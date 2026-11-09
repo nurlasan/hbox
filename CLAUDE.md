@@ -60,18 +60,17 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
-
-```bash
-# Example:
-# npm install
-# npm test
-```
+Пока нет кода — см. задачу «Каркас репозитория Hbox» (`bd ready`).
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Hbox — запись звука в заведениях. ESP32-S3 (ESP-IDF) + INMP441 пишет MP3 моно 128 кбит/с 44.1 кГц
+в часовые файлы на microSD (7 дней), модем ML307R (запасной A7670C) отправляет их с докачкой
+на наш сервер. Запись и часы работы задаются удалённо с сервера. Требования — `docs/requirements.md`.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Время хранится в UTC, отображается в Asia/Almaty.
+- Имя файла: `<ID канала>_YYYYMMDD_HHMMSS.mp3`, время начала по UTC, файл ровно с начала часа.
+- Согласие заведений на запись обеспечивает заказчик.
+- Токены, пароли, ключи и сертификаты — не в git.
