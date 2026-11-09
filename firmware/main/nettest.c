@@ -74,6 +74,15 @@ void nettest_run(void)
 	modem_at("AT+COPS?", "+COPS:", line, 2000);
 	printf("HBOX NET %s\n", line);
 
+	/* мобильный интернет (PDP): обычно включается сам, иначе — вручную */
+	line[0] = '\0';
+	modem_at("AT+MIPCALL?", "+MIPCALL:", line, 2000);
+	if (!strstr(line, "+MIPCALL: 1,1")) {
+		modem_at("AT+MIPCALL=1,1", NULL, NULL, 5000);
+		modem_wait("+MIPCALL:", line, 30000);
+	}
+	printf("HBOX NET %s\n", line);
+
 	modem_at("AT+MIPCLOSE=0", NULL, NULL, 5000);
 	/* тест: TLS без проверки сертификата; в рабочей прошивке — проверка по нашему CA */
 	modem_at("AT+MSSLCFG=\"auth\",1,0", NULL, NULL, 2000);
@@ -84,6 +93,15 @@ void nettest_run(void)
 	if (modem_at(cmd, NULL, line, 5000) != ESP_OK ||
 	    modem_wait("+MIPOPEN: 0,", line, 70000) != ESP_OK || strcmp(line, "+MIPOPEN: 0,0") != 0) {
 		printf("HBOX NET ERROR open %s\n", line);
+		/* без TLS: если откроется — мешает TLS, если нет — не доходит до сервера */
+		modem_at("AT+MIPCLOSE=0", NULL, NULL, 5000);
+		modem_at("AT+MIPCFG=\"ssl\",0,0", NULL, NULL, 2000);
+		line[0] = '\0';
+		if (modem_at(cmd, NULL, line, 5000) == ESP_OK) {
+			modem_wait("+MIPOPEN: 0,", line, 70000);
+		}
+		printf("HBOX NET plain tcp: %s\n", line);
+		modem_at("AT+MIPCLOSE=0", NULL, NULL, 5000);
 		return;
 	}
 	printf("HBOX NET connected tls in %.1f s\n", seconds_since(t0));
