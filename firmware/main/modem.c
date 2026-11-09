@@ -116,8 +116,10 @@ static esp_err_t read_line(char *line, int64_t until)
 		if (n < MODEM_LINE_MAX - 1) {
 			line[n++] = c;
 			line[n] = '\0';
+			/* данные сокета забраны — отдаём пустую строку, чтобы ждущий их сразу увидел */
 			if (c == ',' && take_rtcp(line, n, until)) {
-				n = 0;
+				line[0] = '\0';
+				return ESP_OK;
 			}
 		}
 	}
@@ -145,7 +147,7 @@ static esp_err_t wait_ok(const char *want, char *out, int64_t until)
 				strcpy(out, line);
 			}
 			return ESP_FAIL;
-		} else if (want && out && starts(line, want)) {
+		} else if (want && out && line[0] && starts(line, want)) {
 			strcpy(out, line);
 		}
 	}

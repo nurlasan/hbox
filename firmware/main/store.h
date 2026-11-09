@@ -33,10 +33,10 @@ struct store_file *store_create(int64_t start_us, int64_t start_utc, const char 
 bool store_write(struct store_file *f, const void *data, size_t len);
 /* Перезапись уже записанного (заголовок контейнера). */
 bool store_pwrite(struct store_file *f, uint32_t offset, const void *data, size_t len);
-/* Файл готов к отправке: считается размер и CRC-32. */
+/* Файл готов к отправке. */
 void store_close(struct store_file *f);
 
-/* Самый старый готовый к отправке файл или NULL. */
+/* Самый старый готовый к отправке файл или NULL; в info — размер и CRC-32. */
 struct store_file *store_next(struct store_info *info);
 size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len);
 /* Сервер подтвердил файл целиком — место освобождается. */

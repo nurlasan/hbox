@@ -76,11 +76,6 @@ static esp_err_t modem_setup(void)
 	if (modem_at("AT+CSQ", "+CSQ:", line, 1000) == ESP_OK) {
 		stats.csq = atoi(line + 6);
 	}
-	line[0] = '\0';
-	if (!clock_valid() && modem_at("AT+CCLK?", "+CCLK:", line, 1000) == ESP_OK &&
-	    clock_set_cclk(line)) {
-		printf("HBOX UP time from network %s\n", line);
-	}
 	/* мобильный интернет: обычно включается сам */
 	line[0] = '\0';
 	modem_at("AT+MIPCALL?", "+MIPCALL:", line, 2000);
@@ -265,8 +260,14 @@ static bool fetch_config(void)
 		printf("HBOX UP config failed (%d) %s\n", code, code == 401 ? "- wrong token" : "");
 		return false;
 	}
-	if (!clock_valid() && json_str("time", t, sizeof(t)) && clock_set_iso(t)) {
-		printf("HBOX UP time from server %s\n", t);
+	/* время — с сервера при каждом запросе: AT+CCLK у ML307R отдаёт UTC с поясом, а по
+	 * документации должно быть местное, — такому не доверяем */
+	if (json_str("time", t, sizeof(t))) {
+		bool first = !clock_valid();
+
+		if (clock_set_iso(t) && first) {
+			printf("HBOX UP time from server %s\n", t);
+		}
 	}
 	struct settings s = *cfg;
 

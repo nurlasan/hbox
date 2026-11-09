@@ -44,8 +44,8 @@ static bool IRAM_ATTR on_overflow(i2s_chan_handle_t h, i2s_event_data_t *e, void
 esp_err_t mic_start(void)
 {
 	i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-	/* 8 × 1023 отсчётов ≈ 185 мс запаса, пока кодировщик занят кадром */
-	chan.dma_desc_num = 8;
+	/* 24 × 1023 отсчётов ≈ 0,55 с запаса: смена файла (инициализация кодека) дольше кадра */
+	chan.dma_desc_num = 24;
 	chan.dma_frame_num = 1023;
 	i2s_std_config_t std = {
 		.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE),

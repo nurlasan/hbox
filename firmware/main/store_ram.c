@@ -90,7 +90,6 @@ bool store_pwrite(struct store_file *f, uint32_t offset, const void *data, size_
 
 void store_close(struct store_file *f)
 {
-	f->info.crc = esp_rom_crc32_le(0, f->data, f->info.size);
 	xSemaphoreTake(lock, portMAX_DELAY);
 	f->state = f->info.size ? READY : FREE;
 	xSemaphoreGive(lock);
@@ -107,9 +106,13 @@ struct store_file *store_next(struct store_info *info)
 	}
 	if (f) {
 		f->state = SENDING;
-		*info = f->info;
 	}
 	xSemaphoreGive(lock);
+	/* CRC — здесь, в задаче отправки: в записи это пауза, за которую теряется звук */
+	if (f) {
+		f->info.crc = esp_rom_crc32_le(0, f->data, f->info.size);
+		*info = f->info;
+	}
 	return f;
 }
 

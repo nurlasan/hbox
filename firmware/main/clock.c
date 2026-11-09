@@ -21,7 +21,6 @@ static int64_t days_from_civil(int y, int m, int d)
 
 static bool set(int y, int mo, int d, int h, int mi, int s, int offset_s)
 {
-	/* модем без сети отдаёт 1970/2000-е — такому времени не верим */
 	if (y < 2025 || y > 2037 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 60) {
 		return false;
 	}
@@ -44,18 +43,6 @@ int64_t clock_at(int64_t us)
 int64_t clock_now(void)
 {
 	return clock_at(esp_timer_get_time());
-}
-
-bool clock_set_cclk(const char *line)
-{
-	const char *q = strchr(line, '"');
-	int y, mo, d, h, mi, s, tz = 0;
-	char sign = '+';
-
-	if (!q || sscanf(q + 1, "%d/%d/%d,%d:%d:%d%c%d", &y, &mo, &d, &h, &mi, &s, &sign, &tz) < 6) {
-		return false;
-	}
-	return set(2000 + y, mo, d, h, mi, s, (sign == '-' ? -tz : tz) * 15 * 60);
 }
 
 bool clock_set_iso(const char *s)
