@@ -27,6 +27,9 @@ static struct settings *cfg;
 static struct uplink_stats stats = {.state = "modem", .csq = -1};
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static bool sock_open;
+/* nginx закрывает простаивающее соединение через 120 с — заранее открываем новое */
+static int64_t sock_used_us;
+#define SOCK_IDLE_US (100 * 1000000LL)
 /* тело запроса кусками из хранилища; ответ сервера */
 static uint8_t chunk[MODEM_SEND_MAX];
 static char resp[1024];
@@ -116,7 +119,7 @@ static esp_err_t sock_connect(void)
 {
 	char cmd[80], line[MODEM_LINE_MAX] = "";
 
-	if (sock_open && !modem_sock_closed()) {
+	if (sock_open && !modem_sock_closed() && esp_timer_get_time() - sock_used_us < SOCK_IDLE_US) {
 		return ESP_OK;
 	}
 	sock_close();
@@ -197,6 +200,7 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 		sock_close();
 	}
 	memmove(resp, body, strlen(body) + 1);
+	sock_used_us = esp_timer_get_time();
 	return code;
 
 broken:
