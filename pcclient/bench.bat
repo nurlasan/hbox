@@ -1,5 +1,5 @@
 @echo off
-rem Тест кодировщиков: ждёт замер с платы, сохраняет bench.mp3 и bench.aac. Порт: bench.bat COM7
+rem Тест кодировщиков: ждёт замер с платы, сохраняет bench.mp3 и bench.m4a. Порт: bench.bat COM7
 chcp 65001 >nul
 cd /d "%~dp0"
 if exist .venv .venv\Scripts\python -c "" 2>nul || rmdir /s /q .venv

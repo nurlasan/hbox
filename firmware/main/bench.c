@@ -8,6 +8,7 @@
 #include <esp_timer.h>
 #include <layer3.h>
 
+#include "m4a.h"
 #include "mic.h"
 
 #define BITRATE 128000
@@ -21,6 +22,9 @@ struct codec {
 	size_t (*open)(void);
 	/* кодирует кадр, возвращает число байт в *out (может быть 0 — кодировщик копит) */
 	int (*encode)(int16_t *pcm, const uint8_t **out);
+	/* контейнер: начало файла в buf (возвращает длину) и конец после len байт с кадрами */
+	size_t (*start)(uint8_t *buf);
+	size_t (*finish)(uint8_t *buf, size_t len, size_t cap);
 	void (*close)(void);
 };
 
@@ -55,6 +59,10 @@ static void mp3_close(void)
 static void *aac;
 static uint8_t *aac_out;
 static int aac_in_size, aac_out_size;
+static struct m4a_info aac_info;
+/* размеры записанных кадров для moov; 10 с при 44.1 кГц — 431 кадр AAC */
+static uint32_t sizes[512];
+static uint32_t nsizes, sizes_next;
 
 static size_t aac_open(void)
 {
@@ -63,6 +71,8 @@ static size_t aac_open(void)
 	cfg.sample_rate = MIC_SAMPLE_RATE;
 	cfg.channel = ESP_AUDIO_MONO;
 	cfg.bitrate = BITRATE;
+	cfg.adts_used = false; /* кадры кладём в .m4a */
+	aac_info = (struct m4a_info){.sample_rate = MIC_SAMPLE_RATE, .channels = 1, .bitrate = BITRATE};
 	if (esp_aac_enc_open(&cfg, sizeof(cfg), &aac) != ESP_AUDIO_ERR_OK) {
 		return 0;
 	}
@@ -83,6 +93,49 @@ static int aac_encode(int16_t *pcm, const uint8_t **out)
 	return o.encoded_bytes;
 }
 
+static uint32_t next_size(void *ctx)
+{
+	return sizes[sizes_next++];
+}
+
+struct sink {
+	uint8_t *buf;
+	size_t len, cap;
+};
+
+static void sink_put(void *ctx, const void *data, size_t n)
+{
+	struct sink *s = ctx;
+
+	if (s->len + n <= s->cap) {
+		memcpy(s->buf + s->len, data, n);
+	}
+	s->len += n;
+}
+
+static size_t m4a_start(uint8_t *buf)
+{
+	m4a_head(buf);
+	return M4A_HEAD_SIZE;
+}
+
+static size_t m4a_finish(uint8_t *buf, size_t len, size_t cap)
+{
+	struct sink s = {buf, len, cap};
+	uint32_t mdat;
+
+	aac_info.frames = nsizes;
+	aac_info.data_bytes = len - M4A_HEAD_SIZE;
+	mdat = m4a_mdat_size(&aac_info);
+	sizes_next = 0;
+	m4a_moov(&aac_info, next_size, NULL, sink_put, &s);
+	buf[M4A_MDAT_SIZE_OFFSET] = mdat >> 24;
+	buf[M4A_MDAT_SIZE_OFFSET + 1] = mdat >> 16;
+	buf[M4A_MDAT_SIZE_OFFSET + 2] = mdat >> 8;
+	buf[M4A_MDAT_SIZE_OFFSET + 3] = mdat;
+	return s.len <= cap ? s.len : 0;
+}
+
 static void aac_close(void)
 {
 	esp_aac_enc_close(aac);
@@ -90,8 +143,8 @@ static void aac_close(void)
 }
 
 static const struct codec codecs[] = {
-	{"mp3", "mp3", mp3_open, mp3_encode, mp3_close},
-	{"aac", "aac", aac_open, aac_encode, aac_close},
+	{"mp3", "mp3", mp3_open, mp3_encode, NULL, NULL, mp3_close},
+	{"aac", "m4a", aac_open, aac_encode, m4a_start, m4a_finish, aac_close},
 };
 
 static void dump(const char *name, const uint8_t *data, size_t len)
@@ -134,6 +187,12 @@ static void run(const struct codec *c, uint8_t *buf, size_t cap)
 	}
 	pcm = heap_caps_aligned_alloc(16, frame * sizeof(int16_t), MALLOC_CAP_INTERNAL);
 	total = (size_t)SECONDS * MIC_SAMPLE_RATE / frame;
+	nsizes = 0;
+	/* место под конец контейнера (moov ≈ 600 байт + 4 на кадр) */
+	if (c->finish) {
+		cap -= 4096;
+		len = c->start(buf);
+	}
 	ovf = mic_overflows();
 	for (; pcm && frames < total; frames++) {
 		const uint8_t *out;
@@ -152,14 +211,21 @@ static void run(const struct codec *c, uint8_t *buf, size_t cap)
 			printf("HBOX BENCH codec=%s ERROR encode\n", c->name);
 			break;
 		}
-		if (len + n <= cap) {
-			memcpy(buf + len, out, n);
-			len += n;
+		if (len + n > cap || (n && nsizes == sizeof(sizes) / sizeof(sizes[0]))) {
+			break;
+		}
+		memcpy(buf + len, out, n);
+		len += n;
+		if (n) {
+			sizes[nsizes++] = n;
 		}
 	}
 	ovf = mic_overflows() - ovf;
 	c->close();
 	heap_caps_free(pcm);
+	if (c->finish) {
+		len = c->finish(buf, len, cap + 4096);
+	}
 
 	/* доля времени ядра на кодирование: кадр звука длится frame / 44100 с */
 	double audio_us = (double)frames * frame * 1e6 / MIC_SAMPLE_RATE;

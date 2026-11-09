@@ -1,6 +1,6 @@
 """Принимает с платы результат теста кодировщиков (прошивка hbox, bench.c).
 
-Плата раз в минуту пишет 10 с MP3 и 10 с AAC и выгружает их в консоль USB:
+Плата раз в минуту пишет 10 с MP3 и 10 с AAC (.m4a) и выгружает их в консоль USB:
     HBOX BENCH codec=mp3 ... cpu=..%
     HBOX FILE bench.mp3 <байт>
     <base64>...
@@ -33,7 +33,7 @@ def main():
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent))
     args = ap.parse_args()
     port = args.port or find_port()
-    want = {"bench.mp3", "bench.aac"}
+    want = {"bench.mp3", "bench.m4a"}
     print(f"Порт {port}. Жду замер (до минуты)...")
 
     with serial.Serial(port, 115200, timeout=90) as s:
