@@ -169,12 +169,13 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 		body_confirmed = off;
 	}
 
-	/* заголовки ответа, затем тело по Content-Length */
+	/* заголовки ответа, затем тело по Content-Length; сервер отвечает сразу — 15 с без ответа значит,
+	 * до него дошло не всё (модем потерял кусок), ждать дальше бесполезно */
 	while (!(body = strstr(resp, "\r\n\r\n"))) {
 		if (have >= sizeof(resp) - 1) {
 			goto broken;
 		}
-		n = modem_sock_recv(resp + have, sizeof(resp) - 1 - have, 60000);
+		n = modem_sock_recv(resp + have, sizeof(resp) - 1 - have, 15000);
 		if (n <= 0) {
 			goto broken;
 		}
@@ -189,7 +190,7 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 	body += 4;
 	need = (body - resp) + (cl ? strtoul(cl + 17, NULL, 10) : 0);
 	while (have < need && have < sizeof(resp) - 1) {
-		n = modem_sock_recv(resp + have, sizeof(resp) - 1 - have, 30000);
+		n = modem_sock_recv(resp + have, sizeof(resp) - 1 - have, 15000);
 		if (n <= 0) {
 			goto broken;
 		}
