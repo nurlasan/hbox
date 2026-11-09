@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <driver/i2s_std.h>
+#include <esp_attr.h>
 
 #include "board.h"
 
