@@ -33,6 +33,8 @@ static int64_t sock_used_us;
 /* тело запроса кусками из хранилища; ответ сервера */
 static uint8_t chunk[MODEM_SEND_MAX];
 static char resp[1024];
+/* сколько байт тела последнего запроса модем точно принял (OK на AT+MIPSEND) */
+static uint32_t body_confirmed;
 
 void uplink_get_stats(struct uplink_stats *st)
 {
@@ -144,6 +146,7 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 	char *body;
 
 	resp[0] = '\0';
+	body_confirmed = 0;
 	if (sock_connect() != ESP_OK) {
 		return -1;
 	}
@@ -162,6 +165,7 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 			goto broken;
 		}
 		off += len;
+		body_confirmed = off;
 	}
 
 	/* заголовки ответа, затем тело по Content-Length */
@@ -320,6 +324,13 @@ static bool file_name(const struct store_info *info, char *out, size_t cap)
 	return true;
 }
 
+/*
+ * После обрыва посреди AT+MIPSEND модем мог отправить кусок с потерянными байтами — у сервера
+ * хвост с дырой. Продолжаем не с размера на сервере, а с последнего подтверждённого модемом места.
+ */
+static struct store_file *resume_file;
+static uint32_t resume_at;
+
 /* Отправляет файл до конца или до обрыва. true — сервер подтвердил файл целиком. */
 static bool send_file(struct store_file *f, const struct store_info *info)
 {
@@ -342,6 +353,9 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 		if (size < 0 || size > (long)info->size) {
 			size = 0;
 		}
+		if (resume_file == f && size > (long)resume_at) {
+			size = resume_at;
+		}
 		int64_t t0 = esp_timer_get_time();
 
 		set_state("send");
@@ -349,6 +363,9 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 			 (unsigned long)info->size, (unsigned long)info->crc);
 		code = http("PUT", path, f, size, info->size - size);
 		double sec = (esp_timer_get_time() - t0) / 1e6;
+
+		resume_file = code < 0 ? f : NULL;
+		resume_at = size + body_confirmed;
 
 		if (code == 200 && json_bool("done", 0) == 1) {
 			taskENTER_CRITICAL(&mux);

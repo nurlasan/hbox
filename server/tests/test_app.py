@@ -41,13 +41,25 @@ def test_resume_after_break(client, tmp_path):
     r = put(client, data[:120_000], 0, len(data), crc)
     assert r.json() == {"size": 120_000, "done": False}
     assert client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json() == {"size": 120_000, "done": False}
-    # повтор с неверной позиции — сервер говорит, сколько у него есть
-    r = put(client, data[50_000:], 50_000, len(data), crc)
+    # дальше того, что есть, — нельзя: сервер говорит, сколько у него
+    r = put(client, data[150_000:], 150_000, len(data), crc)
     assert r.status_code == 409 and r.json()["size"] == 120_000
     r = put(client, data[120_000:], 120_000, len(data), crc)
     assert r.json() == {"size": len(data), "done": True}
     assert (tmp_path / "cafe-1" / "2026-11-10" / NAME).read_bytes() == data
     assert not list((tmp_path / ".partial").rglob("*.part"))
+
+
+def test_rewind_drops_broken_tail(client, tmp_path):
+    data = os.urandom(200_000)
+    crc = zlib.crc32(data)
+    # обрыв: последние 8 КБ пришли испорченными (модем потерял байты)
+    broken = data[:100_000] + os.urandom(8192)
+    assert put(client, broken, 0, len(data), crc).json()["size"] == 108_192
+    # устройство продолжает с последнего подтверждённого модемом места
+    r = put(client, data[100_000:], 100_000, len(data), crc)
+    assert r.json() == {"size": len(data), "done": True}
+    assert (tmp_path / "cafe-1" / "2026-11-10" / NAME).read_bytes() == data
 
 
 def test_crc_mismatch_starts_over(client):

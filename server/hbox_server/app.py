@@ -4,7 +4,8 @@
     GET  /hbox/v1/files/<имя>                    → {"size": принято байт, "done": файл целый}
     PUT  /hbox/v1/files/<имя>?offset=N&total=T&crc=<crc32 hex>
          тело — байты файла с позиции N; при обрыве принятое сохраняется, устройство
-         спрашивает GET и продолжает с size. Когда принято T байт и CRC сошёлся — файл готов.
+         спрашивает GET и продолжает с size (или раньше — тогда хвост отбрасывается).
+         Когда принято T байт и CRC сошёлся — файл готов.
     GET  /hbox/v1/config?<состояние>             → настройки записи устройства
     POST /hbox/speedtest                         → замер скорости (тело выбрасывается)
     /hbox/admin/...                              → сайт (admin.py)
@@ -125,9 +126,20 @@ async def file_put(request: Request):
         part.parent.mkdir(parents=True, exist_ok=True)
         st = load_state(state)
         size = min(st["size"], part.stat().st_size) if part.exists() else 0
-        if offset != size:
+        if offset > size:
             return error(409, "offset mismatch", size=size)
         crc = st["crc"] if size else 0
+        if offset < size:
+            # устройство знает, докуда модем точно передал; хвост после обрыва мог прийти с дырой
+            log.info("%s %s: rewind %d -> %d", dev, name, size, offset)
+            crc = 0
+            with open(part, "rb") as f:
+                left = offset
+                while left:
+                    chunk = f.read(min(left, 1 << 20))
+                    crc = zlib.crc32(chunk, crc)
+                    left -= len(chunk)
+            size = offset
         try:
             with open(part, "r+b" if part.exists() else "wb") as f:
                 f.truncate(size)

@@ -180,7 +180,15 @@ esp_err_t modem_at_data(const char *cmd, const void *data, size_t len, int timeo
 		}
 	}
 	tx(data, len);
-	return wait_ok(NULL, NULL, until);
+	esp_err_t err = wait_ok(NULL, NULL, until);
+
+	if (err == ESP_ERR_TIMEOUT) {
+		/* модем недополучил байты и всё ещё ждёт данные: ESC отменяет ввод */
+		tx("\x1b", 1);
+		vTaskDelay(pdMS_TO_TICKS(1000));
+		uart_flush_input(UART);
+	}
+	return err;
 }
 
 esp_err_t modem_wait(const char *prefix, char *out, int timeout_ms)
