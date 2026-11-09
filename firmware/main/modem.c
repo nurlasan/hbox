@@ -12,6 +12,8 @@
 static int baud;
 static bool swapped;
 
+static bool starts(const char *s, const char *prefix);
+
 static int64_t deadline(int timeout_ms)
 {
 	return esp_timer_get_time() + (int64_t)timeout_ms * 1000;
@@ -25,6 +27,58 @@ static void tx(const void *data, size_t len)
 static void tx_str(const char *s)
 {
 	tx(s, strlen(s));
+}
+
+/*
+ * Принятые из сокета байты. Модем выдаёт их посреди ответов на AT-команды как
+ * +MIPURC: "rtcp",<id>,<длина>,<байты> — read_line вынимает их сюда, где бы они ни пришли.
+ */
+#define SOCK_RX 16384
+static uint8_t sock_rx[SOCK_RX];
+static size_t rx_head, rx_tail;
+static volatile bool sock_closed;
+
+static void sock_put(const uint8_t *p, size_t n)
+{
+	while (n--) {
+		size_t next = (rx_head + 1) % SOCK_RX;
+
+		if (next == rx_tail) {
+			return; /* ответы сервера маленькие; переполнение — ответ не разберётся */
+		}
+		sock_rx[rx_head] = *p++;
+		rx_head = next;
+	}
+}
+
+/* После третьей запятой в строке +MIPURC: "rtcp" идут сырые байты указанной длины. */
+static bool take_rtcp(const char *line, size_t n, int64_t until)
+{
+	static const char prefix[] = "+MIPURC: \"rtcp\",";
+	int id, len, commas = 0;
+	uint8_t buf[256];
+
+	if (line[n - 1] != ',' || n < sizeof(prefix) || strncmp(line, prefix, sizeof(prefix) - 1)) {
+		return false;
+	}
+	for (size_t i = 0; i < n; i++) {
+		commas += line[i] == ',';
+	}
+	if (commas != 3 || sscanf(line + sizeof(prefix) - 1, "%d,%d,", &id, &len) != 2) {
+		return false;
+	}
+	while (len > 0) {
+		int64_t left = until - esp_timer_get_time();
+		int got = uart_read_bytes(UART, buf, len < (int)sizeof(buf) ? len : (int)sizeof(buf),
+					  pdMS_TO_TICKS((left > 1000000 ? left : 1000000) / 1000));
+
+		if (got <= 0) {
+			break;
+		}
+		sock_put(buf, got);
+		len -= got;
+	}
+	return true;
 }
 
 /* Строка без \r\n; приглашение '>' приходит без перевода строки — отдаётся сразу. */
@@ -50,6 +104,9 @@ static esp_err_t read_line(char *line, int64_t until)
 				continue;
 			}
 			line[n] = '\0';
+			if (starts(line, "+MIPURC: \"disconn\"")) {
+				sock_closed = true;
+			}
 			return ESP_OK;
 		}
 		if (n == 0 && c == '>') {
@@ -58,6 +115,10 @@ static esp_err_t read_line(char *line, int64_t until)
 		}
 		if (n < MODEM_LINE_MAX - 1) {
 			line[n++] = c;
+			line[n] = '\0';
+			if (c == ',' && take_rtcp(line, n, until)) {
+				n = 0;
+			}
 		}
 	}
 }
@@ -206,4 +267,55 @@ int modem_baud(void)
 bool modem_swapped(void)
 {
 	return swapped;
+}
+
+void modem_sock_reset(void)
+{
+	rx_head = rx_tail = 0;
+	sock_closed = false;
+}
+
+bool modem_sock_closed(void)
+{
+	return sock_closed && rx_head == rx_tail;
+}
+
+esp_err_t modem_sock_send(int id, const void *data, size_t len, int timeout_ms)
+{
+	const uint8_t *p = data;
+	char cmd[32];
+
+	while (len) {
+		size_t n = len < MODEM_SEND_MAX ? len : MODEM_SEND_MAX;
+		esp_err_t err;
+
+		if (sock_closed) {
+			return ESP_ERR_INVALID_STATE;
+		}
+		snprintf(cmd, sizeof(cmd), "AT+MIPSEND=%d,%u", id, (unsigned)n);
+		err = modem_at_data(cmd, p, n, timeout_ms);
+		if (err) {
+			return err;
+		}
+		p += n;
+		len -= n;
+	}
+	return ESP_OK;
+}
+
+size_t modem_sock_recv(void *buf, size_t len, int timeout_ms)
+{
+	int64_t until = deadline(timeout_ms);
+	char line[MODEM_LINE_MAX];
+	uint8_t *p = buf;
+	size_t n = 0;
+
+	/* пусто — читаем поток модема: read_line сам складывает данные сокета в sock_rx */
+	while (rx_head == rx_tail && !sock_closed && read_line(line, until) == ESP_OK) {
+	}
+	while (n < len && rx_tail != rx_head) {
+		p[n++] = sock_rx[rx_tail];
+		rx_tail = (rx_tail + 1) % SOCK_RX;
+	}
+	return n;
 }

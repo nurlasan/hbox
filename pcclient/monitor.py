@@ -1,7 +1,7 @@
-"""Вывод платы Hbox в окне. Команда при запуске (по умолчанию «n» — тест модема сейчас);
-клавиши n, b в окне уходят на плату.
+"""Вывод платы Hbox в окне. При запуске отправляет команду (по умолчанию «s» — состояние);
+нажатые в окне клавиши уходят на плату.
 
-    monitor.py [COM7] [--cmd n]
+    monitor.py [COM7] [--cmd "t <токен>"]
 """
 
 import argparse
@@ -23,19 +23,19 @@ def find_port():
     for p in list_ports.comports():
         if p.vid == ESP_USB_VID:
             return p.device
-    sys.exit("Плата не найдена. Укажите порт: net.bat COM7")
+    sys.exit("Плата не найдена. Укажите порт: monitor.bat COM7")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("port", nargs="?")
-    ap.add_argument("--cmd", default="n")
+    ap.add_argument("--cmd", default="s")
     args = ap.parse_args()
     port = args.port or find_port()
     print(f"Порт {port}. Ctrl+C - выход.")
     with serial.Serial(port, 115200, timeout=0.2) as s:
         if args.cmd:
-            s.write(args.cmd.encode())
+            s.write(args.cmd.encode() + b"\r\n")
         buf = b""
         while True:
             while msvcrt and msvcrt.kbhit():

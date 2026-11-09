@@ -1,23 +1,66 @@
 /*
- * Hbox на ESP32-S3 SuperMini. Пока — тесты:
- *   тест модема (hbox-xsg) при включении и раз в 10 минут;
- *   тест кодировщиков (hbox-stf) — по команде «b» в консоли USB.
+ * Hbox на ESP32-S3 SuperMini: запись звука в файлы и отправка на сервер через ML307R.
+ *
+ * Консоль USB (pcclient/monitor.bat):
+ *   t <токен>  — токен устройства с сервера (HBOX_DEVICES в .env), хранится в NVS;
+ *   s          — состояние сейчас (иначе раз в минуту).
  */
 #include <stdio.h>
+#include <string.h>
 #include <driver/usb_serial_jtag.h>
 #include <driver/usb_serial_jtag_vfs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include "bench.h"
+#include "clock.h"
 #include "mic.h"
-#include "nettest.h"
+#include "recorder.h"
+#include "settings.h"
+#include "store.h"
+#include "uplink.h"
 
-#define NET_EVERY_MS (10 * 60 * 1000)
+#define STATUS_EVERY_MS 60000
+
+static struct settings settings;
+
+static void status(void)
+{
+	struct recorder_stats rec;
+	struct uplink_stats up;
+	int64_t now = clock_now();
+
+	recorder_get_stats(&rec);
+	uplink_get_stats(&up);
+	printf("HBOX STATUS time=%lld channel=%s rec=%d %s/%d files=%lu cpu=%lu.%lu%% overflows=%lu "
+	       "rec_errors=%lu | pending=%lu dropped=%lu | up=%s csq=%d sent=%lu files %lu KB "
+	       "last=%lu.%lu KB/s up_errors=%lu\n",
+	       now, settings.channel[0] ? settings.channel : "?", rec.recording, settings.format,
+	       settings.bitrate / 1000, (unsigned long)rec.files, (unsigned long)rec.cpu10 / 10,
+	       (unsigned long)rec.cpu10 % 10, (unsigned long)rec.overflows, (unsigned long)rec.errors,
+	       (unsigned long)store_pending(), (unsigned long)store_dropped(), up.state, up.csq,
+	       (unsigned long)up.sent_files, (unsigned long)up.sent_kb, (unsigned long)up.kbps10 / 10,
+	       (unsigned long)up.kbps10 % 10, (unsigned long)up.errors);
+}
+
+static void command(char *line)
+{
+	if (strncmp(line, "t ", 2) == 0 && strlen(line + 2) < sizeof(settings.token)) {
+		/* меняем токен — канал узнаем от сервера заново */
+		strcpy(settings.token, line + 2);
+		settings.channel[0] = '\0';
+		settings_save(&settings);
+		printf("HBOX token saved\n");
+	} else if (strcmp(line, "s") == 0) {
+		status();
+	}
+}
 
 void app_main(void)
 {
 	usb_serial_jtag_driver_config_t usb = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+	TickType_t next_status = xTaskGetTickCount() + pdMS_TO_TICKS(STATUS_EVERY_MS);
+	char line[80];
+	size_t n = 0;
 	esp_err_t err;
 
 	/* с драйвером printf ждёт, пока ПК заберёт данные; без него при заполнении буфера вывод теряется */
@@ -25,27 +68,39 @@ void app_main(void)
 	if (usb_serial_jtag_driver_install(&usb) == ESP_OK) {
 		usb_serial_jtag_vfs_use_driver();
 	}
+	settings_load(&settings);
+	printf("HBOX start channel=%s token=%s format=%s bitrate=%d record=%d\n",
+	       settings.channel[0] ? settings.channel : "?", settings.token[0] ? "set" : "none",
+	       settings.format, settings.bitrate, settings.record);
+
+	if (!store_init()) {
+		printf("HBOX ERROR store: no PSRAM\n");
+	}
 	err = mic_start();
 	if (err) {
 		printf("HBOX ERROR mic %s\n", esp_err_to_name(err));
+	} else {
+		recorder_start(settings.format, settings.bitrate, settings.record);
 	}
-	vTaskDelay(pdMS_TO_TICKS(3000));
+	uplink_start(&settings);
+
 	for (;;) {
-		TickType_t until = xTaskGetTickCount() + pdMS_TO_TICKS(NET_EVERY_MS);
 		uint8_t c;
 
-		nettest_run();
-		printf("HBOX ready: next modem test in 10 min; 'n' - now, 'b' - codec bench\n");
-		while (xTaskGetTickCount() < until) {
-			if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(500)) != 1) {
-				continue;
+		if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(500)) == 1) {
+			if (c == '\r' || c == '\n') {
+				line[n] = '\0';
+				if (n) {
+					command(line);
+				}
+				n = 0;
+			} else if (n < sizeof(line) - 1) {
+				line[n++] = c;
 			}
-			if (c == 'n') {
-				break;
-			}
-			if (c == 'b' && !err) {
-				bench_run();
-			}
+		}
+		if (xTaskGetTickCount() >= next_status) {
+			next_status += pdMS_TO_TICKS(STATUS_EVERY_MS);
+			status();
 		}
 	}
 }
