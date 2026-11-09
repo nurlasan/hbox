@@ -17,3 +17,4 @@ pcclient/.venv/
 pcclient/*.bin
 pcclient/bench.*
 !pcclient/bench.bat
+__pycache__/
