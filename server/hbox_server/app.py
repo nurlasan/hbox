@@ -5,11 +5,12 @@
     PUT  /hbox/v1/files/<имя>?offset=N&total=T&crc=<crc32 hex>
          тело — байты файла с позиции N; при обрыве принятое сохраняется, устройство
          спрашивает GET и продолжает с size. Когда принято T байт и CRC сошёлся — файл готов.
-    GET  /hbox/v1/config                         → настройки записи устройства
+    GET  /hbox/v1/config?<состояние>             → настройки записи устройства
     POST /hbox/speedtest                         → замер скорости (тело выбрасывается)
+    /hbox/admin/...                              → сайт (admin.py)
 
-Устройство определяется по токену (Authorization: Bearer). Токены — переменная HBOX_DEVICES
-"id:токен,id:токен" в .env (не в git).
+Устройство определяется по токену (Authorization: Bearer); устройства и их настройки —
+devices.py (data/devices.json).
 """
 
 import asyncio
@@ -27,7 +28,9 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, PlainTextResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+
+from . import admin, devices
 
 log = logging.getLogger("hbox")
 
@@ -40,28 +43,14 @@ PARTIAL_DAYS = 7
 
 NAME = re.compile(r"^[A-Za-z0-9-]{1,32}_(\d{8})_(\d{6})\.(mp3|m4a)$")
 
-DEFAULT_CONFIG = {
-    "record": True,
-    "format": "mp3",
-    "bitrate": 128000,
-    # часы работы заведения по Asia/Almaty; пусто — круглосуточно
-    "schedule": [],
-}
-
-
-def devices() -> dict[str, str]:
-    """токен → id устройства"""
-    out = {}
-    for item in os.environ.get("HBOX_DEVICES", "").split(","):
-        dev, _, token = item.strip().partition(":")
-        if dev and token:
-            out[token] = dev
-    return out
+# состояние устройства в запросе настроек (числа; см. firmware/main/uplink.c)
+STATUS_FIELDS = ("rec", "files", "pending", "dropped", "overflows", "rec_errors", "cpu", "csq",
+                 "up_errors", "sent", "kbps", "uptime")
 
 
 def device_of(request: Request) -> str | None:
     auth = request.headers.get("authorization", "")
-    return devices().get(auth.removeprefix("Bearer ").strip()) if auth.startswith("Bearer ") else None
+    return devices.by_token(auth.removeprefix("Bearer ").strip()) if auth.startswith("Bearer ") else None
 
 
 def free_gb() -> float:
@@ -176,7 +165,18 @@ async def config(request: Request):
     dev = device_of(request)
     if not dev:
         return error(401, "unknown device")
-    return JSONResponse({**DEFAULT_CONFIG, "channel": dev,
+    status = {}
+    for k in STATUS_FIELDS:
+        try:
+            status[k] = int(request.query_params[k])
+        except (KeyError, ValueError):
+            pass
+    if status:
+        devices.report(dev, status)
+    d = devices.load()[dev]
+    record, recheck = devices.recording_now(d)
+    return JSONResponse({"record": record, "format": d["format"], "bitrate": d["bitrate"],
+                         "recheck": recheck, "channel": dev,
                          "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
 
 
@@ -241,6 +241,7 @@ app = Starlette(
         Route("/hbox/v1/files/{name}", file_put, methods=["PUT"]),
         Route("/hbox/v1/config", config, methods=["GET"]),
         Route("/hbox/speedtest", speedtest, methods=["POST"]),
+        Mount("/hbox/admin", routes=admin.routes),
     ],
     lifespan=lifespan,
 )

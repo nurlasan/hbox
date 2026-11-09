@@ -112,3 +112,90 @@ def test_cleanup_low_disk_removes_oldest(client, tmp_path, monkeypatch):
     hbox.cleanup(now=2000)
     left = [p.name for p in (tmp_path / "cafe-1" / "2026-11-10").iterdir()]
     assert left == ["cafe-1_20261110_090000.mp3"]
+
+
+# --- устройства, расписание, сайт ---
+
+from datetime import datetime  # noqa: E402
+
+from hbox_server import devices  # noqa: E402
+
+ADMIN = ("admin", "pw")
+SITE = {"Origin": "http://testserver"}
+
+
+@pytest.fixture
+def site(client, monkeypatch):
+    monkeypatch.setenv("HBOX_ADMIN_PASSWORD", "pw")
+    return client
+
+
+def at(s):
+    return datetime.fromisoformat(s).replace(tzinfo=devices.TZ).timestamp()
+
+
+def test_schedule():
+    d = {"record": True, "schedule": ["10:00-23:00", "", "", "", "22:00-02:00", "", ""]}
+    # 2026-11-09 — понедельник
+    assert devices.recording_now(d, at("2026-11-09 09:59"))[0] is False
+    assert devices.recording_now(d, at("2026-11-09 10:00"))[0] is True
+    assert devices.recording_now(d, at("2026-11-09 22:59"))[0] is True
+    assert devices.recording_now(d, at("2026-11-09 23:00"))[0] is False
+    assert devices.recording_now(d, at("2026-11-10 12:00"))[0] is False  # вторник пустой
+    assert devices.recording_now(d, at("2026-11-13 23:30"))[0] is True   # пятница через полночь
+    assert devices.recording_now(d, at("2026-11-14 01:59"))[0] is True
+    assert devices.recording_now(d, at("2026-11-14 02:00"))[0] is False
+    # перед сменой — спросить снова к моменту смены
+    state, recheck = devices.recording_now(d, at("2026-11-09 09:58"))
+    assert state is False and 60 <= recheck <= 120
+    assert devices.recording_now({"record": False, "schedule": None})[0] is False
+    assert devices.recording_now({"record": True, "schedule": None}) == (True, devices.RECHECK_MAX)
+
+
+def test_config_reports_status(client):
+    r = client.get("/hbox/v1/config?rec=1&pending=2&csq=27&bogus=x", headers=AUTH).json()
+    assert r["recheck"] == devices.RECHECK_MAX
+    d = devices.load()["cafe-1"]
+    assert d["status"] == {"rec": 1, "pending": 2, "csq": 27} and d["seen"] > 0
+
+
+def test_site_needs_password(client, monkeypatch):
+    monkeypatch.setenv("HBOX_ADMIN_PASSWORD", "pw")
+    assert client.get("/hbox/admin/").status_code == 401
+    assert client.get("/hbox/admin/", auth=("admin", "no")).status_code == 401
+
+
+def test_site_flow(site, tmp_path):
+    data = b"abc"
+    put(site, data, 0, 3, zlib.crc32(data))
+    page = site.get("/hbox/admin/", auth=ADMIN).text
+    assert "cafe-1" in page and NAME in page
+
+    r = site.post("/hbox/admin/add", data={"name": "bar-1"}, headers=SITE, auth=ADMIN,
+                  follow_redirects=False)
+    assert r.status_code == 303
+    token = devices.load()["bar-1"]["token"]
+    assert token in site.get("/hbox/admin/token/bar-1.bat", auth=ADMIN).text
+    # новое устройство сразу принимается
+    assert site.get("/hbox/v1/config", headers={"Authorization": f"Bearer {token}"}).json()["channel"] == "bar-1"
+
+    form = {"record": "on", "format": "m4a", "bitrate": "96000", "use_schedule": "on",
+            "day0": "10:00-23:00", **{f"day{i}": "" for i in range(1, 7)}}
+    assert site.post("/hbox/admin/device/cafe-1", data=form, headers=SITE, auth=ADMIN,
+                     follow_redirects=False).status_code == 303
+    d = devices.load()["cafe-1"]
+    assert d["format"] == "m4a" and d["bitrate"] == 96000 and d["schedule"][0] == "10:00-23:00"
+    assert site.get("/hbox/v1/config", headers=AUTH).json()["format"] == "m4a"
+
+    bad = {**form, "day1": "25:99"}
+    site.post("/hbox/admin/device/cafe-1", data=bad, headers=SITE, auth=ADMIN)
+    assert devices.load()["cafe-1"]["schedule"][1] == ""
+
+    assert site.get(f"/hbox/admin/file/cafe-1/2026-11-10/{NAME}", auth=ADMIN).content == data
+    assert site.get("/hbox/admin/file/cafe-1/2026-11-10/..%2F..%2Fdevices.json", auth=ADMIN).status_code == 404
+
+
+def test_site_rejects_foreign_post(site):
+    r = site.post("/hbox/admin/add", data={"name": "evil"}, headers={"Origin": "https://evil.example"},
+                  auth=ADMIN)
+    assert r.status_code == 403 and "evil" not in devices.load()

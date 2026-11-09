@@ -18,7 +18,7 @@
 #define SOCK 0
 #define SSL_ID 1
 #define CA_NAME "hbox_ca.pem"
-#define CONFIG_EVERY_US (5 * 60 * 1000000LL)
+#define CONFIG_EVERY_S (5 * 60)
 
 extern const char ca_pem_start[] asm("_binary_hbox_ca_pem_start");
 extern const char ca_pem_end[] asm("_binary_hbox_ca_pem_end");
@@ -251,14 +251,27 @@ static int json_bool(const char *key, int def)
 
 /* --- настройки и файлы --- */
 
-static bool fetch_config(void)
+/* Настройки; заодно состояние устройства для сайта. Возвращает, через сколько секунд спросить снова. */
+static int fetch_config(void)
 {
-	char channel[sizeof(cfg->channel)], format[8], t[32];
-	int code = http("GET", "/hbox/v1/config", NULL, 0, 0);
+	char channel[sizeof(cfg->channel)], format[8], t[32], path[256];
+	struct recorder_stats rec;
+	int code;
+
+	recorder_get_stats(&rec);
+	snprintf(path, sizeof(path),
+		 "/hbox/v1/config?rec=%d&files=%lu&pending=%lu&dropped=%lu&overflows=%lu&rec_errors=%lu"
+		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld",
+		 rec.recording, (unsigned long)rec.files, (unsigned long)store_pending(),
+		 (unsigned long)store_dropped(), (unsigned long)rec.overflows, (unsigned long)rec.errors,
+		 (unsigned long)rec.cpu10 / 10, stats.csq, (unsigned long)stats.errors,
+		 (unsigned long)stats.sent_files, (unsigned long)stats.kbps10 / 10,
+		 esp_timer_get_time() / 60000000);
+	code = http("GET", path, NULL, 0, 0);
 
 	if (code != 200) {
 		printf("HBOX UP config failed (%d) %s\n", code, code == 401 ? "- wrong token" : "");
-		return false;
+		return 0;
 	}
 	/* время — с сервера при каждом запросе: AT+CCLK у ML307R отдаёт UTC с поясом, а по
 	 * документации должно быть местное, — такому не доверяем */
@@ -286,7 +299,10 @@ static bool fetch_config(void)
 		       s.bitrate, s.record);
 	}
 	recorder_configure(cfg->format, cfg->bitrate, cfg->record);
-	return true;
+	/* сервер знает расписание и говорит, когда спросить снова (к смене пауза/запись) */
+	long recheck = json_long("recheck", CONFIG_EVERY_S);
+
+	return recheck < 5 ? 5 : recheck > CONFIG_EVERY_S ? CONFIG_EVERY_S : recheck;
 }
 
 /* <канал>_YYYYMMDD_HHMMSS.<ext>; false — времени ещё нет */
@@ -379,8 +395,10 @@ static void task(void *arg)
 		}
 		if (esp_timer_get_time() >= config_at) {
 			set_state("idle");
-			if (fetch_config()) {
-				config_at = esp_timer_get_time() + CONFIG_EVERY_US;
+			int recheck = fetch_config();
+
+			if (recheck) {
+				config_at = esp_timer_get_time() + recheck * 1000000LL;
 				failures = 0;
 			} else {
 				failures++;
