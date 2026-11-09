@@ -1,22 +1,26 @@
-# Сервер Hbox на Hetzner рядом с music-monitor. Снаружи порт не открыт (облачный файрвол):
-# устройства ходят на 18443 музыкального прокси music-monitor, он пересылает /hbox/ сюда
-# по сети namys_default.
+# Сервер Hbox на Hetzner 178.104.149.56. Снаружи открыт только 18443 (облачный файрвол):
+# там nginx снимает TLS и отдаёт /hbox/ серверу. Ключи TLS — deploy/tls/ (не в git).
 services:
+  proxy:
+    image: nginx:alpine
+    depends_on: [speedtest]
+    ports:
+      - "18443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/tls/server.crt:/etc/nginx/tls/server.crt:ro
+      - ./deploy/tls/server.key:/etc/nginx/tls/server.key:ro
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "5m"
+
   speedtest:
     image: python:3.11-slim
     command: python /app/speedtest.py
     volumes:
       - ./server/speedtest.py:/app/speedtest.py:ro
-    networks:
-      default:
-      namys:
-        aliases: [hbox-speedtest]
     restart: unless-stopped
     logging:
       options:
         max-size: "1m"
-
-networks:
-  namys:
-    name: namys_default
-    external: true
