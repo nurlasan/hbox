@@ -11,7 +11,8 @@
 #include "modem.h"
 
 #define SERVER "178.104.149.56"
-#define PORT 18600
+/* порт прокси music-monitor: другие у сервера закрыты, /hbox/ он отдаёт серверу Hbox */
+#define PORT 18443
 #define TOTAL (2 * 1024 * 1024)
 #define CHUNK 8192 /* больше AT+MIPSEND не берёт */
 #define LIMIT_S 300
@@ -106,6 +107,17 @@ void nettest_run(void)
 	}
 	printf("HBOX NET connected tls in %.1f s\n", seconds_since(t0));
 
+	/* HTTP-запрос с телом TOTAL байт: заголовок, затем тело кусками */
+	snprintf((char *)data, sizeof(data),
+		 "POST /hbox/speedtest HTTP/1.1\r\nHost: %s\r\nContent-Type: application/octet-stream\r\n"
+		 "Content-Length: %d\r\nConnection: close\r\n\r\n",
+		 SERVER, TOTAL);
+	snprintf(cmd, sizeof(cmd), "AT+MIPSEND=0,%d", (int)strlen((char *)data));
+	if (modem_at_data(cmd, data, strlen((char *)data), 30000) != ESP_OK) {
+		printf("HBOX NET ERROR send header\n");
+		modem_at("AT+MIPCLOSE=0", NULL, NULL, 5000);
+		return;
+	}
 	esp_fill_random(data, sizeof(data));
 	snprintf(cmd, sizeof(cmd), "AT+MIPSEND=0,%d", CHUNK);
 	t0 = esp_timer_get_time();

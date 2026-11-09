@@ -1,14 +1,22 @@
-# Сервер Hbox на Hetzner рядом с music-monitor. Ключи TLS — deploy/tls/ (не в git).
+# Сервер Hbox на Hetzner рядом с music-monitor. Снаружи порт не открыт (облачный файрвол):
+# устройства ходят на 18443 музыкального прокси music-monitor, он пересылает /hbox/ сюда
+# по сети namys_default.
 services:
   speedtest:
     image: python:3.11-slim
     command: python /app/speedtest.py
     volumes:
       - ./server/speedtest.py:/app/speedtest.py:ro
-      - ./deploy/tls:/tls:ro
-    ports:
-      - "18600:18600"
+    networks:
+      default:
+      namys:
+        aliases: [hbox-speedtest]
     restart: unless-stopped
     logging:
       options:
         max-size: "1m"
+
+networks:
+  namys:
+    name: namys_default
+    external: true
