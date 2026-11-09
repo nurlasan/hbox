@@ -61,7 +61,7 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 ## Build & Test
 
 Прошивка (`firmware/`, ESP-IDF v5.5, ESP32-S3) собирается только в GitHub Actions (`.github/workflows/firmware.yml`,
-артефакт `hbox-firmware` → `hbox.bin` с адреса 0x0). Локально образ espressif/idf не тянуть: 12 ГБ, диск сервера переполняется.
+артефакт `hbox-firmware`: bootloader.bin 0x0, partition-table.bin 0x8000, hbox.bin 0x10000). Локально образ espressif/idf не тянуть: 12 ГБ, диск сервера переполняется.
 
 ```bash
 gh run list -R nurlasan/hbox -L 3          # статус сборки

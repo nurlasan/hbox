@@ -1,16 +1,17 @@
 @echo off
 rem Прошивка ESP32-S3 SuperMini через USB-C. Порт - автоматически или: esp_flash.bat COM7
+rem Три части по своим адресам: токен устройства (NVS, 0x9000) не стирается.
 chcp 65001 >nul
 cd /d "%~dp0"
-if not exist hbox.bin (
-  echo Нет файла hbox.bin рядом с esp_flash.bat
+if not exist partition-table.bin (
+  echo Нет файлов bootloader.bin, partition-table.bin, hbox.bin рядом с esp_flash.bat
   pause
   exit /b 1
 )
 call :venv || goto :fail
 set PORTARG=
 if not "%1"=="" set PORTARG=--port %1
-.venv\Scripts\python -m esptool --chip esp32s3 %PORTARG% write-flash --flash-size detect 0x0 hbox.bin || goto :fail
+.venv\Scripts\python -m esptool --chip esp32s3 %PORTARG% write-flash --flash-size detect 0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 hbox.bin || goto :fail
 echo Готово. Плата перезагрузится сама; если нет - нажмите RST.
 pause
 exit /b 0

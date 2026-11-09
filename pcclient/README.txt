@@ -3,7 +3,8 @@ Hbox — утилиты для Windows
 1. Python 3.12 (если нет): в PowerShell
        winget install Python.Python.3.12
 
-2. Прошивка ESP32-S3 SuperMini: положить hbox.bin рядом и запустить esp_flash.bat
+2. Прошивка ESP32-S3 SuperMini: bootloader.bin, partition-table.bin, hbox.bin рядом -> esp_flash.bat
+   (токен в плате при перепрошивке сохраняется)
    (порт находится сам; иначе esp_flash.bat COM7).
 
 3. Подключение (SuperMini):
