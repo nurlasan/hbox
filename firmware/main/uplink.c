@@ -157,11 +157,12 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 	if (modem_sock_send(SOCK, head, n, 30000) != ESP_OK) {
 		goto broken;
 	}
+	/* 8 КБ модем принимает за доли секунды; 10 с без OK — он потерял байты и ждёт остаток */
 	for (uint32_t off = 0; off < body_len;) {
 		size_t len = store_read(f, body_off + off, chunk,
 					body_len - off < sizeof(chunk) ? body_len - off : sizeof(chunk));
 
-		if (!len || modem_sock_send(SOCK, chunk, len, 30000) != ESP_OK) {
+		if (!len || modem_sock_send(SOCK, chunk, len, 10000) != ESP_OK) {
 			goto broken;
 		}
 		off += len;

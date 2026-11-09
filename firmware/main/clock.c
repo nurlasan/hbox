@@ -25,8 +25,13 @@ static bool set(int y, int mo, int d, int h, int mi, int s, int offset_s)
 		return false;
 	}
 	int64_t utc = days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s - offset_s;
+	int64_t epoch = utc - esp_timer_get_time() / 1000000;
 
-	epoch_at_boot = utc - esp_timer_get_time() / 1000000;
+	/* время сервера — с точностью до секунды: мелкие поправки не берём, иначе часы дёргаются
+	 * на ±1 с и у границы периода получается лишний файл длиной в секунду */
+	if (!epoch_at_boot || epoch - epoch_at_boot >= 2 || epoch_at_boot - epoch >= 2) {
+		epoch_at_boot = epoch;
+	}
 	return true;
 }
 
