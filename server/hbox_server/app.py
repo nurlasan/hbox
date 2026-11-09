@@ -38,7 +38,7 @@ log = logging.getLogger("hbox")
 DATA = Path(os.environ.get("HBOX_DATA", "/data"))
 # меньше этого свободного места — не принимать (диск сервера общий с другими проектами)
 MIN_FREE_GB = float(os.environ.get("HBOX_MIN_FREE_GB", "3"))
-RETENTION_DAYS = float(os.environ.get("HBOX_RETENTION_DAYS", "30"))
+RETENTION_DAYS = float(os.environ.get("HBOX_RETENTION_DAYS", "7"))
 # недокачанный файл, к которому никто не возвращается, — удалить
 PARTIAL_DAYS = 7
 
