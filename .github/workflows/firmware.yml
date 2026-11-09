@@ -1,0 +1,29 @@
+# Прошивка ESP32-S3 SuperMini (ESP-IDF). Готовый hbox.bin (пишется с адреса 0x0) — в артефактах запуска.
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w/firmware espressif/idf:v5.5.1 sh -c '
+            idf.py set-target esp32s3 build &&
+            cd build && esptool.py --chip esp32s3 merge_bin -o /w/hbox.bin @flash_args'
+          ls -l hbox.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hbox-firmware
+          path: hbox.bin
+          retention-days: 30

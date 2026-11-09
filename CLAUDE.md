@@ -60,7 +60,15 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-Пока нет кода — см. задачу «Каркас репозитория Hbox» (`bd ready`).
+Прошивка (`firmware/`, ESP-IDF v5.5, ESP32-S3) собирается только в GitHub Actions (`.github/workflows/firmware.yml`,
+артефакт `hbox-firmware` → `hbox.bin` с адреса 0x0). Локально образ espressif/idf не тянуть: 12 ГБ, диск сервера переполняется.
+
+```bash
+gh run list -R nurlasan/hbox -L 3          # статус сборки
+gh run download -R nurlasan/hbox -n hbox-firmware -D <папка>
+```
+
+Windows-утилиты — `pcclient/` (esp_flash.bat, bench.bat). Сервер — `server/` (пока пусто, hbox-4lh).
 
 ## Architecture Overview
 

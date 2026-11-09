@@ -5,3 +5,15 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# ESP-IDF
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+# Windows-утилиты
+pcclient/.venv/
+pcclient/*.bin
+pcclient/bench.*
+!pcclient/bench.bat
