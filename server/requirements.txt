@@ -1,0 +1,4 @@
+starlette==0.47.2
+uvicorn==0.35.0
+pytest==8.4.1
+httpx==0.28.1

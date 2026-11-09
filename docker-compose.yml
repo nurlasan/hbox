@@ -1,9 +1,9 @@
 # Сервер Hbox на Hetzner 178.104.149.56. Снаружи открыт только 18443 (облачный файрвол):
-# там nginx снимает TLS и отдаёт /hbox/ серверу. Ключи TLS — deploy/tls/ (не в git).
+# там nginx снимает TLS и отдаёт /hbox/ серверу. Ключи TLS — deploy/tls/, токены — .env (не в git).
 services:
   proxy:
     image: nginx:alpine
-    depends_on: [speedtest]
+    depends_on: [server]
     ports:
       - "18443:443"
     volumes:
@@ -15,12 +15,15 @@ services:
       options:
         max-size: "5m"
 
-  speedtest:
-    image: python:3.11-slim
-    command: python /app/speedtest.py
+  server:
+    build: server
+    image: hbox-server:dev
+    env_file: .env
+    environment:
+      HBOX_DATA: /data
     volumes:
-      - ./server/speedtest.py:/app/speedtest.py:ro
+      - ./data:/data
     restart: unless-stopped
     logging:
       options:
-        max-size: "1m"
+        max-size: "5m"

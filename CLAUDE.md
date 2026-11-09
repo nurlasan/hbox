@@ -68,7 +68,15 @@ gh run list -R nurlasan/hbox -L 3          # статус сборки
 gh run download -R nurlasan/hbox -n hbox-firmware -D <папка>
 ```
 
-Windows-утилиты — `pcclient/` (esp_flash.bat, bench.bat). Сервер — `server/` (пока пусто, hbox-4lh).
+Windows-утилиты — `pcclient/` (esp_flash.bat, bench.bat, net.bat).
+
+Сервер (`server/`, протокол — `docs/protocol.md`) — на Hetzner 178.104.149.56 рядом с другими проектами,
+снаружи только порт 18443 (nginx `deploy/nginx.conf`). Ключи TLS — `deploy/tls/`, токены — `.env`.
+
+```bash
+docker build -t hbox-server:dev server && docker run --rm hbox-server:dev python -m pytest -q   # тесты
+docker compose -p hbox up -d --build                                                         # запуск
+```
 
 ## Architecture Overview
 
