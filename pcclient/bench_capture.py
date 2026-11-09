@@ -43,16 +43,23 @@ def main():
             if not raw:
                 sys.exit("Плата молчит 90 с. Нажмите RST и запустите снова.")
             line = raw.decode("ascii", "replace").strip()
+            if name and line.startswith("HBOX") and not line.startswith("HBOX END "):
+                # конец файла потерялся — бросаем его, строку разбираем как обычную
+                print(f"{name}: приём оборвался, жду следующий замер")
+                name = None
             if name is None:
                 if line.startswith("HBOX FILE "):
                     _, _, name, size = line.split()
                     size, chunks = int(size), []
+                    print(f"Приём {name}...")
                 elif line.startswith("HBOX"):
                     print(line)
             elif line.startswith("HBOX END "):
-                data = base64.b64decode("".join(chunks))
-                crc = int(line.split()[2], 16)
-                if len(data) != size or zlib.crc32(data) != crc:
+                try:
+                    data = base64.b64decode("".join(chunks))
+                except ValueError:
+                    data = b""
+                if len(data) != size or zlib.crc32(data) != int(line.split()[2], 16):
                     print(f"{name}: битый приём ({len(data)} из {size} байт), жду следующий")
                 else:
                     path = Path(args.out) / name
@@ -62,7 +69,6 @@ def main():
                 name = None
             else:
                 chunks.append(line)
-
 
 if __name__ == "__main__":
     main()
