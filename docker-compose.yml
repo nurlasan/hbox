@@ -1,0 +1,14 @@
+# Сервер Hbox на Hetzner рядом с music-monitor. Ключи TLS — deploy/tls/ (не в git).
+services:
+  speedtest:
+    image: python:3.11-slim
+    command: python /app/speedtest.py
+    volumes:
+      - ./server/speedtest.py:/app/speedtest.py:ro
+      - ./deploy/tls:/tls:ro
+    ports:
+      - "18600:18600"
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "1m"

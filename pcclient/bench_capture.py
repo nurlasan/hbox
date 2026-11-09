@@ -1,6 +1,6 @@
 """Принимает с платы результат теста кодировщиков (прошивка hbox, bench.c).
 
-Плата раз в минуту пишет 10 с MP3 и 10 с AAC (.m4a) и выгружает их в консоль USB:
+По команде «b» плата пишет 10 с MP3 и 10 с AAC (.m4a) и выгружает их в консоль USB:
     HBOX BENCH codec=mp3 ... cpu=..%
     HBOX FILE bench.mp3 <байт>
     <base64>...
@@ -34,18 +34,20 @@ def main():
     args = ap.parse_args()
     port = args.port or find_port()
     want = {"bench.mp3", "bench.m4a"}
-    print(f"Порт {port}. Жду замер (до минуты)...")
+    print(f"Порт {port}. Замер 20 с...")
 
-    with serial.Serial(port, 115200, timeout=90) as s:
+    with serial.Serial(port, 115200, timeout=400) as s:
+        s.write(b"b")
         name, size, chunks = None, 0, []
         while want:
             raw = s.readline()
             if not raw:
-                sys.exit("Плата молчит 90 с. Нажмите RST и запустите снова.")
+                sys.exit("Плата молчит 400 с. Нажмите RST и запустите снова.")
             line = raw.decode("ascii", "replace").strip()
             if name and line.startswith("HBOX") and not line.startswith("HBOX END "):
                 # конец файла потерялся — бросаем его, строку разбираем как обычную
-                print(f"{name}: приём оборвался, жду следующий замер")
+                print(f"{name}: приём оборвался, повторяю замер")
+                s.write(b"b")
                 name = None
             if name is None:
                 if line.startswith("HBOX FILE "):
@@ -60,7 +62,8 @@ def main():
                 except ValueError:
                     data = b""
                 if len(data) != size or zlib.crc32(data) != int(line.split()[2], 16):
-                    print(f"{name}: битый приём ({len(data)} из {size} байт), жду следующий")
+                    print(f"{name}: битый приём ({len(data)} из {size} байт), повторяю замер")
+                s.write(b"b")
                 else:
                     path = Path(args.out) / name
                     path.write_bytes(data)

@@ -18,3 +18,7 @@ pcclient/*.bin
 pcclient/bench.*
 !pcclient/bench.bat
 __pycache__/
+
+# ключи и сертификаты сервера
+deploy/tls/
+.env
