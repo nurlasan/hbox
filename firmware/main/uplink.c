@@ -1,4 +1,3 @@
-#define _GNU_SOURCE /* strcasestr */
 #include "uplink.h"
 
 #include <stdio.h>
@@ -303,7 +302,7 @@ static bool file_name(const struct store_info *info, char *out, size_t cap)
 /* Отправляет файл до конца или до обрыва. true — сервер подтвердил файл целиком. */
 static bool send_file(struct store_file *f, const struct store_info *info)
 {
-	char name[64], path[160];
+	char name[96], path[224];
 	int code;
 	long size;
 
@@ -389,7 +388,7 @@ static void task(void *arg)
 		struct store_info info;
 		struct store_file *f = store_next(&info);
 
-		char name[64];
+		char name[96];
 
 		if (!f || !file_name(&info, name, sizeof(name))) {
 			/* нечего слать или ещё нет времени/канала для имени файла */
