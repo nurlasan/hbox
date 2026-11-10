@@ -421,6 +421,9 @@ static void ota_run(void)
 		}
 		crc = esp_rom_crc32_le(crc, buf, len);
 		off += len;
+		if (off % (128 * 1024) == 0) {
+			printf("HBOX UP ota %lu/%lu KB\n", (unsigned long)off / 1024, (unsigned long)ota.size / 1024);
+		}
 	}
 	if (crc != ota.crc) {
 		printf("HBOX UP ota crc %08lx != %08lx\n", (unsigned long)crc, (unsigned long)ota.crc);
