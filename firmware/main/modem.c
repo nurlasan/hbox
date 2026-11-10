@@ -285,8 +285,9 @@ esp_err_t modem_dial(const char *cmd, char *out)
 		if (n <= 0 || memchr(buf, 0x7e, n)) {
 			return ESP_OK;
 		}
-		for (int i = 0; i + 7 <= n; i++) {
-			if (memcmp(buf + i, "CONNECT", 7) == 0) {
+		/* ML307R отвечает OK (не CONNECT) и ждёт LCP — тоже пробуем PPP */
+		for (int i = 0; i + 2 <= n; i++) {
+			if (memcmp(buf + i, "OK", 2) == 0 || (i + 7 <= n && memcmp(buf + i, "CONNECT", 7) == 0)) {
 				return ESP_OK;
 			}
 		}
