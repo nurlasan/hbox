@@ -67,6 +67,9 @@ static SemaphoreHandle_t lock;
 static RingbufHandle_t ring;
 static sdmmc_card_t *card;
 static uint32_t seq, dropped;
+/* последняя ошибка карты: после неё новый файл — не раньше чем через FAIL_PAUSE_US */
+static volatile int64_t failed_us;
+#define FAIL_PAUSE_US 10000000LL
 /* запись: копится по STAGE_BYTES и одним куском уходит в кольцо */
 static struct {
 	struct op op;
@@ -108,7 +111,8 @@ static bool mount(void)
 		}
 		bus_ready = true;
 	}
-	host.max_freq_khz = 20000;
+	/* 10 МГц — с запасом для проводов и преобразователя уровней на модуле; поток записи ~16 КБ/с */
+	host.max_freq_khz = 10000;
 	dev.gpio_cs = PIN_CS;
 	dev.host_id = host.slot;
 	err = esp_vfs_fat_sdspi_mount(MOUNT, &host, &dev, &mc, &card);
@@ -198,14 +202,17 @@ static void writer(void *arg)
 			out = fopen(path, "wb");
 			f->failed = !out;
 			if (!out) {
+				failed_us = esp_timer_get_time();
 				printf("HBOX SD ERROR create %s\n", path);
 			}
 			break;
 		case OP_WRITE:
 			if (out && fwrite(op->data, 1, n, out) == n) {
 				f->info.size += n;
-			} else {
+			} else if (!f->failed) {
 				f->failed = true;
+				failed_us = esp_timer_get_time();
+				printf("HBOX SD ERROR write %s\n", path);
 			}
 			break;
 		case OP_PWRITE:
@@ -330,6 +337,9 @@ struct store_file *store_create(int64_t start_us, int64_t start_utc, const char 
 
 	static int64_t tried_us;
 
+	if (failed_us && esp_timer_get_time() - failed_us < FAIL_PAUSE_US) {
+		return NULL;
+	}
 	/* карту могли вставить после включения — пробуем раз в 30 с */
 	if (!card && (tried_us && esp_timer_get_time() - tried_us < 30000000)) {
 		return NULL;
