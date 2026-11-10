@@ -45,12 +45,13 @@ CRC — стандартный CRC-32 (zlib, `esp_rom_crc32_le(0, ...)`). Сер
 
 ```
 GET /hbox/v1/config?rec=1&files=12&pending=0&dropped=0&overflows=0&rec_errors=0&cpu=32&csq=27
-                    &up_errors=0&sent=11&kbps=54&uptime=95
+                    &up_errors=0&sent=11&kbps=54&uptime=95&reset=1
 → {"record": true, "format": "mp3", "bitrate": 128000, "recheck": 300, "channel": "<id>",
    "time": "2026-11-10T09:00:00Z"}
 ```
 
 Параметры запроса — состояние устройства для сайта (все числа, любые можно опустить).
+`uptime` — минуты с включения, `reset` — причина последнего перезапуска (`esp_reset_reason()`).
 `record` сервер считает сам по расписанию (часы работы по дням недели, Asia/Almaty) и выключателю
 на сайте; `recheck` — через сколько секунд спросить снова (к ближайшей смене, не больше 300).
 `time` — время сервера (UTC): по нему устройство ставит часы при каждом запросе.

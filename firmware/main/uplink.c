@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 #include <esp_rom_crc.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -264,12 +265,12 @@ static int fetch_config(void)
 	recorder_get_stats(&rec);
 	snprintf(path, sizeof(path),
 		 "/hbox/v1/config?rec=%d&files=%lu&pending=%lu&dropped=%lu&overflows=%lu&rec_errors=%lu"
-		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld",
+		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld&reset=%d",
 		 rec.recording, (unsigned long)rec.files, (unsigned long)store_pending(),
 		 (unsigned long)store_dropped(), (unsigned long)rec.overflows, (unsigned long)rec.errors,
 		 (unsigned long)rec.cpu10 / 10, stats.csq, (unsigned long)stats.errors,
 		 (unsigned long)stats.sent_files, (unsigned long)stats.kbps10 / 10,
-		 esp_timer_get_time() / 60000000);
+		 esp_timer_get_time() / 60000000, (int)esp_reset_reason());
 	code = http("GET", path, NULL, 0, 0);
 
 	if (code != 200) {

@@ -27,8 +27,21 @@ STATUS_TITLES = {
     "pending": "ждут отправки", "dropped": "выброшено", "overflows": "потери звука",
     "rec_errors": "ошибки записи", "up_errors": "ошибки связи", "csq": "сигнал (0–31)",
     "cpu": "кодирование, %", "sent": "отправлено файлов", "kbps": "скорость, КБ/с",
-    "files": "записано файлов", "uptime": "работает, мин",
+    "files": "записано файлов", "uptime": "работает, мин", "reset": "причина перезапуска",
 }
+
+# esp_reset_reason_t (ESP-IDF 5.5)
+RESETS = {
+    0: "неизвестно", 1: "включение питания", 2: "кнопка/внешний сброс", 3: "программный", 4: "сбой прошивки",
+    5: "сторожевой таймер (прерывания)", 6: "сторожевой таймер (задача)", 7: "сторожевой таймер",
+    8: "выход из сна", 9: "просадка питания", 10: "SDIO", 11: "USB", 12: "JTAG", 13: "eFuse",
+    14: "помеха по питанию", 15: "зависание CPU",
+}
+BAD_RESETS = {4, 5, 6, 7, 9, 14, 15}
+
+
+def status_value(k: str, v) -> str:
+    return RESETS.get(v, str(v)) if k == "reset" else str(v)
 
 STYLE = """
 body{font:15px/1.45 system-ui,sans-serif;margin:0;padding:16px;background:#f6f6f4;color:#222}
@@ -137,6 +150,8 @@ async def index(request: Request):
         last = player(dev, days[0][0], today[0][0]) if today else '<span class="muted">нет</span>'
         problems = [f"{STATUS_TITLES[k]}: {st[k]}" for k in ("dropped", "overflows", "rec_errors")
                     if st.get(k)]
+        if st.get("reset") in BAD_RESETS:
+            problems.append(f"перезапуск: {RESETS[st['reset']]}")
         rows.append(
             f'<tr><td><a href="{BASE}/device/{esc(dev)}"><b>{esc(dev)}</b></a></td>'
             f'<td class="{"ok" if online else "bad"}">{"на связи" if online else "нет связи"}'
@@ -174,7 +189,7 @@ async def device(request: Request):
                   for f in devices.FORMATS)
     br = "".join(f'<option value="{b}"{" selected" if b == d["bitrate"] else ""}>{b // 1000} кбит/с</option>'
                  for b in devices.BITRATES)
-    status = "".join(f"<tr><td>{esc(STATUS_TITLES.get(k, k))}</td><td>{esc(v)}</td></tr>"
+    status = "".join(f"<tr><td>{esc(STATUS_TITLES.get(k, k))}</td><td>{esc(status_value(k, v))}</td></tr>"
                      for k, v in st.items() if k in STATUS_TITLES)
     files = "".join(
         f"<h2>{esc(day)} · {len(items)} файлов · {sum(i[1] for i in items) / 1e6:.0f} МБ</h2>"

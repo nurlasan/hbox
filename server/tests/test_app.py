@@ -213,10 +213,10 @@ def test_schedule():
 
 
 def test_config_reports_status(client):
-    r = client.get("/hbox/v1/config?rec=1&pending=2&csq=27&bogus=x", headers=AUTH).json()
+    r = client.get("/hbox/v1/config?rec=1&pending=2&csq=27&reset=9&bogus=x", headers=AUTH).json()
     assert r["recheck"] == devices.RECHECK_MAX
     d = devices.load()["cafe-1"]
-    assert d["status"] == {"rec": 1, "pending": 2, "csq": 27} and d["seen"] > 0
+    assert d["status"] == {"rec": 1, "pending": 2, "csq": 27, "reset": 9} and d["seen"] > 0
 
 
 def test_site_needs_password(client, monkeypatch):
