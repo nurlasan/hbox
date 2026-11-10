@@ -40,7 +40,8 @@ def test_resume_after_break(client, tmp_path):
     # первый запрос оборвался после 120 000 байт
     r = put(client, data[:120_000], 0, len(data), crc)
     assert r.json() == {"size": 120_000, "done": False}
-    assert client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json() == {"size": 120_000, "done": False}
+    r = client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json()
+    assert r["size"] == 120_000 and r["done"] is False
     # дальше того, что есть, — нельзя: сервер говорит, сколько у него
     r = put(client, data[150_000:], 150_000, len(data), crc)
     assert r.status_code == 409 and r.json()["size"] == 120_000
@@ -62,11 +63,25 @@ def test_rewind_drops_broken_tail(client, tmp_path):
     assert (tmp_path / "cafe-1" / "2026-11-10" / NAME).read_bytes() == data
 
 
+def test_checkpoints_find_broken_tail(client):
+    data = os.urandom(200_000)
+    broken = data[:100_000] + os.urandom(8192)
+    put(client, broken, 0, len(data), zlib.crc32(data))
+    r = client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json()
+    check = dict(item.split(":") for item in r["check"].split(","))
+    step = hbox.CHECK_STEP
+    assert list(map(int, check)) == [step, 2 * step, 3 * step, 108_192]
+    # совпадают только точки до места порчи
+    good = [int(off) for off, crc in check.items() if int(crc, 16) == zlib.crc32(data[:int(off)])]
+    assert good == [step, 2 * step, 3 * step]
+
+
 def test_crc_mismatch_starts_over(client):
     data = os.urandom(10_000)
     r = put(client, data, 0, len(data), zlib.crc32(data) ^ 1)
     assert r.status_code == 422
-    assert client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json() == {"size": 0, "done": False}
+    assert client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json() == {"size": 0, "done": False,
+                                                                         "check": ""}
 
 
 def test_repeat_after_done_is_ok(client):

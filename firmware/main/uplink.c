@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <esp_rom_crc.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -334,6 +335,45 @@ static struct store_file *resume_file;
 static uint32_t resume_at;
 
 /* Отправляет файл до конца или до обрыва. true — сервер подтвердил файл целиком. */
+/*
+ * Сколько из принятого сервером совпадает с файлом: сервер присылает CRC начала файла в нескольких
+ * точках ("check": "смещение:crc,..."), берём последнюю совпавшую. Модем изредка теряет байты —
+ * хвост на сервере тогда испорчен, и докачка поверх него кончилась бы 422 и отправкой заново.
+ */
+static long verified_size(struct store_file *f, long size)
+{
+	char check[320], *p = check, *end;
+	uint32_t crc = 0, pos = 0;
+	long good = 0;
+
+	if (size <= 0 || !json_str("check", check, sizeof(check))) {
+		return size;
+	}
+	while (*p) {
+		unsigned long off = strtoul(p, &end, 10);
+
+		if (*end != ':' || off > (unsigned long)size) {
+			break;
+		}
+		uint32_t want = strtoul(end + 1, &end, 16);
+
+		while (pos < off) {
+			size_t n = store_read(f, pos, chunk, off - pos < sizeof(chunk) ? off - pos : sizeof(chunk));
+
+			if (!n) {
+				return good;
+			}
+			crc = esp_rom_crc32_le(crc, chunk, n);
+			pos += n;
+		}
+		if (crc == want) {
+			good = off;
+		}
+		p = *end == ',' ? end + 1 : end;
+	}
+	return good;
+}
+
 static bool send_file(struct store_file *f, const struct store_info *info)
 {
 	char name[96], path[224];
@@ -354,6 +394,12 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 		size = json_long("size", 0);
 		if (size < 0 || size > (long)info->size) {
 			size = 0;
+		}
+		long good = verified_size(f, size);
+
+		if (good != size) {
+			printf("HBOX UP %s: server has %ld, matches up to %ld\n", name, size, good);
+			size = good;
 		}
 		if (resume_file == f && size > (long)resume_at) {
 			size = resume_at;

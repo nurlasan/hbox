@@ -1,7 +1,8 @@
 """Сервер-приёмник Hbox: часовые файлы с устройств с докачкой.
 
 Протокол — docs/protocol.md. Коротко:
-    GET  /hbox/v1/files/<имя>                    → {"size": принято байт, "done": файл целый}
+    GET  /hbox/v1/files/<имя>                    → {"size": принято байт, "done": файл целый,
+                                                     "check": "смещение:crc,..." — CRC начала файла}
     PUT  /hbox/v1/files/<имя>?offset=N&total=T&crc=<crc32 hex>
          тело — байты файла с позиции N; при обрыве принятое сохраняется, устройство
          спрашивает GET и продолжает с size (или раньше — тогда хвост отбрасывается).
@@ -41,6 +42,9 @@ MIN_FREE_GB = float(os.environ.get("HBOX_MIN_FREE_GB", "3"))
 RETENTION_DAYS = float(os.environ.get("HBOX_RETENTION_DAYS", "7"))
 # недокачанный файл, к которому никто не возвращается, — удалить
 PARTIAL_DAYS = 7
+# контрольные точки для докачки: CRC начала файла на каждой границе CHECK_STEP (последние CHECK_COUNT)
+CHECK_STEP = 32768
+CHECK_COUNT = 8
 
 NAME = re.compile(r"^[A-Za-z0-9-]{1,32}_(\d{8})_(\d{6})\.(mp3|m4a)$")
 
@@ -79,6 +83,29 @@ def save_state(state: Path, size: int, crc: int, total: int):
     tmp.replace(state)
 
 
+def checkpoints(part: Path, size: int) -> str:
+    """CRC-32 начала недокачанного файла: на последних границах CHECK_STEP и на size.
+
+    Модем изредка теряет байты, и хвост на сервере приходит испорченным. Устройство сверяет
+    эти CRC со своими и продолжает с последней совпавшей точки (раньше — тогда хвост отбрасывается).
+    """
+    offsets = [k * CHECK_STEP for k in range(max(1, size // CHECK_STEP - CHECK_COUNT + 1),
+                                                size // CHECK_STEP + 1)]
+    if size and size not in offsets:
+        offsets.append(size)
+    out, crc, pos = [], 0, 0
+    with open(part, "rb") as f:
+        for off in offsets:
+            while pos < off:
+                chunk = f.read(min(off - pos, 1 << 20))
+                if not chunk:
+                    return ",".join(out)
+                crc = zlib.crc32(chunk, crc)
+                pos += len(chunk)
+            out.append(f"{off}:{crc:08x}")
+    return ",".join(out)
+
+
 def error(status: int, message: str, **extra) -> JSONResponse:
     return JSONResponse({"error": message, **extra}, status_code=status)
 
@@ -100,7 +127,8 @@ async def file_status(request: Request):
     st = load_state(state)
     # размер по файлу: состояние могло не успеть записаться при обрыве
     size = min(st["size"], part.stat().st_size) if part.exists() else 0
-    return JSONResponse({"size": size, "done": False})
+    check = await asyncio.to_thread(checkpoints, part, size) if size else ""
+    return JSONResponse({"size": size, "done": False, "check": check})
 
 
 async def file_put(request: Request):
