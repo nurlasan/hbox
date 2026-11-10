@@ -76,6 +76,18 @@ def test_checkpoints_find_broken_tail(client):
     assert good == [step, 2 * step, 3 * step]
 
 
+def test_checkpoints_cover_whole_file(tmp_path):
+    data = os.urandom(1_000_000)
+    part = tmp_path / "f.part"
+    part.write_bytes(data)
+    check = [item.split(":") for item in hbox.checkpoints(part, len(data)).split(",")]
+    offs = [int(off) for off, _ in check]
+    step = hbox.CHECK_STEP
+    assert offs[0] == 3 * step and offs[-5:] == [27 * step, 28 * step, 29 * step, 30 * step, len(data)]
+    assert len(offs) <= 12 and offs == sorted(set(offs))
+    assert all(int(crc, 16) == zlib.crc32(data[:int(off)]) for off, crc in check)
+
+
 def test_crc_mismatch_starts_over(client):
     data = os.urandom(10_000)
     r = put(client, data, 0, len(data), zlib.crc32(data) ^ 1)

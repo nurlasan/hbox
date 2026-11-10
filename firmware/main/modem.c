@@ -228,7 +228,7 @@ static bool probe(void)
 
 esp_err_t modem_open(void)
 {
-	static const int rates[] = {115200, 921600};
+	static const int rates[] = {115200, 921600, MODEM_BAUD};
 	uart_config_t cfg = {
 		.baud_rate = 115200,
 		.data_bits = UART_DATA_8_BITS,
@@ -245,8 +245,8 @@ esp_err_t modem_open(void)
 	}
 	/* модем после включения просыпается до ~10 с */
 	for (int round = 0; round < 5 && !found; round++) {
-		for (int i = 0; i < 4 && !found; i++) {
-			set_port(rates[i % 2], i >= 2);
+		for (int i = 0; i < 6 && !found; i++) {
+			set_port(rates[i % 3], i >= 3);
 			found = probe();
 		}
 	}
@@ -254,14 +254,17 @@ esp_err_t modem_open(void)
 		return ESP_ERR_NOT_FOUND;
 	}
 	modem_at("ATE0", NULL, NULL, 1000);
-	if (baud != 921600) {
+	if (baud != MODEM_BAUD) {
+		char cmd[24];
+
 		/* новая скорость действует после ответа OK на эту команду */
-		if (modem_at("AT+IPR=921600", NULL, NULL, 1000) != ESP_OK) {
+		snprintf(cmd, sizeof(cmd), "AT+IPR=%d", MODEM_BAUD);
+		if (modem_at(cmd, NULL, NULL, 1000) != ESP_OK) {
 			return ESP_OK; /* остаёмся на 115200 */
 		}
 		uart_wait_tx_done(UART, pdMS_TO_TICKS(100));
 		vTaskDelay(pdMS_TO_TICKS(50));
-		set_port(921600, swapped);
+		set_port(MODEM_BAUD, swapped);
 		if (!probe()) {
 			return ESP_ERR_INVALID_RESPONSE;
 		}

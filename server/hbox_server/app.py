@@ -42,9 +42,11 @@ MIN_FREE_GB = float(os.environ.get("HBOX_MIN_FREE_GB", "3"))
 RETENTION_DAYS = float(os.environ.get("HBOX_RETENTION_DAYS", "7"))
 # недокачанный файл, к которому никто не возвращается, — удалить
 PARTIAL_DAYS = 7
-# контрольные точки для докачки: CRC начала файла на каждой границе CHECK_STEP (последние CHECK_COUNT)
+# контрольные точки для докачки: CRC начала файла на границах CHECK_STEP — последние CHECK_LAST
+# и CHECK_SPREAD точек по всему файлу (порча бывает и задолго до обрыва)
 CHECK_STEP = 32768
-CHECK_COUNT = 8
+CHECK_LAST = 4
+CHECK_SPREAD = 8
 
 NAME = re.compile(r"^[A-Za-z0-9-]{1,32}_(\d{8})_(\d{6})\.(mp3|m4a)$")
 
@@ -84,13 +86,15 @@ def save_state(state: Path, size: int, crc: int, total: int):
 
 
 def checkpoints(part: Path, size: int) -> str:
-    """CRC-32 начала недокачанного файла: на последних границах CHECK_STEP и на size.
+    """CRC-32 начала недокачанного файла: на границах CHECK_STEP по всему файлу, у конца и на size.
 
     Модем изредка теряет байты, и хвост на сервере приходит испорченным. Устройство сверяет
     эти CRC со своими и продолжает с последней совпавшей точки (раньше — тогда хвост отбрасывается).
     """
-    offsets = [k * CHECK_STEP for k in range(max(1, size // CHECK_STEP - CHECK_COUNT + 1),
-                                                size // CHECK_STEP + 1)]
+    last = size // CHECK_STEP
+    marks = {size * k // CHECK_SPREAD // CHECK_STEP for k in range(1, CHECK_SPREAD)}
+    marks |= set(range(max(1, last - CHECK_LAST + 1), last + 1))
+    offsets = sorted(m * CHECK_STEP for m in marks if m)
     if size and size not in offsets:
         offsets.append(size)
     out, crc, pos = [], 0, 0
