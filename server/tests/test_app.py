@@ -330,7 +330,9 @@ def test_ota_flow(site):
                    for o in range(0, len(blob), 16384))
     assert got == blob
     assert site.get(fw, params={"offset": 0, "len": 16384}).status_code == 401
-    assert site.get(fw, params={"offset": 0, "len": 10**6}, headers=AUTH).status_code == 400
+    assert site.get(fw, params={"offset": 0, "len": 10**7}, headers=AUTH).status_code == 400
+    whole = site.get(fw, params={"offset": 100, "len": len(blob)}, headers=AUTH).content
+    assert whole == blob[100:]  # остаток после обрыва — одним ответом
     assert site.get("/hbox/v1/firmware/../devices.json", params={"offset": 0, "len": 9},
                     headers=AUTH).status_code == 404
     # обновилась — больше не предлагаем

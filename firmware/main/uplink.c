@@ -137,13 +137,16 @@ static esp_err_t sock_connect(void)
 
 /* --- HTTP поверх сокета --- */
 
+/* Приёмник тела ответа по мере прихода (прошивка — сразу во флеш); false — прервать. */
+typedef bool (*http_sink)(const uint8_t *data, size_t len, void *ctx);
+
 /*
  * Запрос с телом из файла хранилища (body_len байт с позиции body_off) или без тела.
- * Ответ — в resp (тело), а если задан out — тело целиком в out (до out_cap байт, длина в *out_len).
- * Возвращает код HTTP или -1 при обрыве.
+ * Ответ — в resp (тело), а если задан sink — тело любой длины потоком в sink.
+ * Возвращает код HTTP или -1 при обрыве (принятое до обрыва sink уже получил).
  */
 static int http_ex(const char *method, const char *path, struct store_file *f, uint32_t body_off,
-		   uint32_t body_len, uint8_t *out, size_t out_cap, size_t *out_len)
+		   uint32_t body_len, http_sink sink, void *ctx)
 {
 	char head[768];
 	size_t have = 0, need;
@@ -194,22 +197,20 @@ static int http_ex(const char *method, const char *path, struct store_file *f, u
 	char *cl = strcasestr(resp, "\r\nContent-Length:");
 
 	body += 4;
-	if (out) {
-		/* тело в out: что пришло вместе с заголовками, и остальное прямо из сокета */
+	if (sink) {
+		/* тело потоком: что пришло вместе с заголовками, и остальное прямо из сокета */
 		size_t clen = cl ? strtoul(cl + 17, NULL, 10) : 0, got = have - (body - resp);
 
-		if (clen > out_cap || got > clen) {
+		if (got > clen || (code == 200 && got && !sink((uint8_t *)body, got, ctx))) {
 			goto broken;
 		}
-		memcpy(out, body, got);
 		while (got < clen) {
-			n = modem_sock_recv(out + got, clen - got, 15000);
-			if (n <= 0) {
+			n = modem_sock_recv(chunk, clen - got < sizeof(chunk) ? clen - got : sizeof(chunk), 15000);
+			if (n <= 0 || (code == 200 && !sink(chunk, n, ctx))) {
 				goto broken;
 			}
 			got += n;
 		}
-		*out_len = clen;
 		if (strcasestr(resp, "\r\nConnection: close")) {
 			sock_close();
 		}
@@ -242,7 +243,7 @@ broken:
 static int http(const char *method, const char *path, struct store_file *f, uint32_t body_off,
 		uint32_t body_len)
 {
-	return http_ex(method, path, f, body_off, body_len, NULL, 0, NULL);
+	return http_ex(method, path, f, body_off, body_len, NULL, NULL);
 }
 
 /* --- маленький разбор JSON ответов сервера --- */
@@ -293,9 +294,8 @@ static int json_bool(const char *key, int def)
 /* --- обновление прошивки по воздуху (docs/protocol.md) --- */
 
 /* ответ с куском (+ заголовки) обязан влезть в приёмный буфер модема SOCK_RX (16 КБ) целиком */
-#define OTA_CHUNK 8192
 /* не получилось — следующая попытка не раньше чем через столько */
-#define OTA_RETRY_US (30 * 60 * 1000000LL)
+#define OTA_RETRY_US (10 * 60 * 1000000LL)
 
 static struct {
 	char name[24], version[33];
@@ -373,14 +373,36 @@ static void ota_check(void)
 		  esp_timer_get_time() >= ota_retry_at;
 }
 
-/* Скачать, проверить CRC и перезагрузиться в новую прошивку. Возврат — только при ошибке. */
+struct ota_dl {
+	esp_ota_handle_t h;
+	uint32_t off, crc;
+};
+
+static bool ota_sink(const uint8_t *data, size_t len, void *ctx)
+{
+	struct ota_dl *d = ctx;
+	uint32_t before = d->off;
+
+	if (d->off + len > ota.size || esp_ota_write(d->h, data, len) != ESP_OK) {
+		return false;
+	}
+	d->crc = esp_rom_crc32_le(d->crc, data, len);
+	d->off += len;
+	if (d->off / (128 * 1024) != before / (128 * 1024)) {
+		printf("HBOX UP ota %lu/%lu KB\n", (unsigned long)d->off / 1024, (unsigned long)ota.size / 1024);
+	}
+	return true;
+}
+
+/*
+ * Скачать одним запросом (обрыв — докачка с того же места), проверить CRC и перезагрузиться
+ * в новую прошивку. Возврат — только при ошибке.
+ */
 static void ota_run(void)
 {
 	const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
-	esp_ota_handle_t h = 0;
-	uint8_t *buf = NULL;
-	uint32_t off = 0, crc = 0;
-	int tries = 0;
+	struct ota_dl d = {0};
+	int64_t t0 = esp_timer_get_time();
 	char path[96];
 
 	ota.due = false;
@@ -389,60 +411,45 @@ static void ota_run(void)
 		printf("HBOX UP ota %s: no room (%lu B)\n", ota.version, (unsigned long)ota.size);
 		return;
 	}
-	buf = heap_caps_malloc(OTA_CHUNK, MALLOC_CAP_SPIRAM);
-	buf = buf ? buf : malloc(OTA_CHUNK);
-	if (!buf || esp_ota_begin(part, ota.size, &h) != ESP_OK) {
+	if (esp_ota_begin(part, ota.size, &d.h) != ESP_OK) {
 		printf("HBOX UP ota %s: begin failed\n", ota.version);
-		free(buf);
 		return;
 	}
 	set_state("ota");
 	printf("HBOX UP ota %s -> %s, %lu B\n", fw_version(), ota.version, (unsigned long)ota.size);
-	while (off < ota.size) {
-		uint32_t len = ota.size - off < OTA_CHUNK ? ota.size - off : OTA_CHUNK;
-		size_t got = 0;
+	for (int tries = 0; d.off < ota.size; tries++) {
+		uint32_t from = d.off;
 		int code;
 
+		if (tries == 10) {
+			printf("HBOX UP ota gave up at %lu\n", (unsigned long)d.off);
+			esp_ota_abort(d.h);
+			return;
+		}
 		snprintf(path, sizeof(path), "/hbox/v1/firmware/%s?offset=%lu&len=%lu", ota.name,
-			 (unsigned long)off, (unsigned long)len);
-		code = http_ex("GET", path, NULL, 0, 0, buf, OTA_CHUNK, &got);
-		if (code != 200 || got != len) {
-			printf("HBOX UP ota get failed (%d) at %lu\n", code, (unsigned long)off);
-			if (++tries >= 5) {
-				goto fail;
-			}
-			vTaskDelay(pdMS_TO_TICKS(3000));
-			continue;
-		}
-		tries = 0;
-		if (esp_ota_write(h, buf, len) != ESP_OK) {
-			printf("HBOX UP ota write failed at %lu\n", (unsigned long)off);
-			goto fail;
-		}
-		crc = esp_rom_crc32_le(crc, buf, len);
-		off += len;
-		if (off % (128 * 1024) == 0) {
-			printf("HBOX UP ota %lu/%lu KB\n", (unsigned long)off / 1024, (unsigned long)ota.size / 1024);
+			 (unsigned long)d.off, (unsigned long)(ota.size - d.off));
+		code = http_ex("GET", path, NULL, 0, 0, ota_sink, &d);
+		if (d.off < ota.size) {
+			printf("HBOX UP ota broke (%d) at %lu (+%lu)\n", code, (unsigned long)d.off,
+			       (unsigned long)(d.off - from));
+			vTaskDelay(pdMS_TO_TICKS(2000));
 		}
 	}
-	if (crc != ota.crc) {
-		printf("HBOX UP ota crc %08lx != %08lx\n", (unsigned long)crc, (unsigned long)ota.crc);
-		goto fail;
-	}
-	/* esp_ota_end ещё раз проверяет образ (контрольная сумма и SHA-256 внутри) */
-	if (esp_ota_end(h) != ESP_OK || esp_ota_set_boot_partition(part) != ESP_OK) {
-		printf("HBOX UP ota image rejected\n");
-		free(buf);
+	if (d.crc != ota.crc) {
+		/* модем потерял байты где-то посередине — заново, но уже не сейчас */
+		printf("HBOX UP ota crc %08lx != %08lx\n", (unsigned long)d.crc, (unsigned long)ota.crc);
+		esp_ota_abort(d.h);
 		return;
 	}
-	free(buf);
-	printf("HBOX UP ota done, restarting into %s\n", ota.version);
+	/* esp_ota_end ещё раз проверяет образ (контрольная сумма и SHA-256 внутри) */
+	if (esp_ota_end(d.h) != ESP_OK || esp_ota_set_boot_partition(part) != ESP_OK) {
+		printf("HBOX UP ota image rejected\n");
+		return;
+	}
+	printf("HBOX UP ota done in %.0f s, restarting into %s\n", (esp_timer_get_time() - t0) / 1e6,
+	       ota.version);
 	vTaskDelay(pdMS_TO_TICKS(500));
 	esp_restart();
-
-fail:
-	esp_ota_abort(h);
-	free(buf);
 }
 
 /* --- настройки и файлы --- */

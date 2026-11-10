@@ -63,7 +63,6 @@ STATUS_FIELDS = ("rec", "files", "pending", "dropped", "overflows", "rec_errors"
 FW_NAME = re.compile(r"^[0-9a-f]{8}\.bin$")
 FW_VERSION = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 FW_MAX = 0x1E0000  # слот прошивки (firmware/partitions.csv)
-FW_PIECE_MAX = 65536
 
 
 def fw_dir() -> Path:
@@ -273,7 +272,7 @@ async def config(request: Request):
 
 
 async def firmware_get(request: Request):
-    """Кусок прошивки: ?offset=&len= (устройство качает по 16 КБ)."""
+    """Прошивка с offset: ?offset=&len= (устройство берёт всё сразу, после обрыва — остаток)."""
     if not device_of(request):
         return error(401, "unknown device")
     name = request.path_params["name"]
@@ -285,7 +284,7 @@ async def firmware_get(request: Request):
         length = int(request.query_params["len"])
     except (KeyError, ValueError):
         return error(400, "need offset, len")
-    if offset < 0 or not 0 < length <= FW_PIECE_MAX:
+    if offset < 0 or not 0 < length <= FW_MAX:
         return error(400, "bad range")
     with open(path, "rb") as f:
         f.seek(offset)

@@ -16,3 +16,6 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
 # имена файлов на карте длиннее 8.3
 CONFIG_FATFS_LFN_HEAP=y
+# приём от модема не останавливается, пока идёт запись во флеш (OTA, NVS): иначе аппаратный буфер UART
+# (128 байт) на 460800 переполняется за 3 мс и байты теряются
+CONFIG_UART_ISR_IN_IRAM=y
