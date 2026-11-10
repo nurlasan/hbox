@@ -210,17 +210,38 @@ static esp_err_t modem_setup(void)
 
 	set_state("ppp");
 	/* как ML307R входит в PPP — пробуем варианты, удачный запоминаем */
-	static const char *const dials[] = {"AT+CGDATA=\"PPP\",1", "ATD*99#", "ATD*99***1#", "ATD*98*1#"};
+	static const char *const dials[] = {"ATD*99#", "ATD*99***1#", "AT+CGDATA=\"PPP\",1", "ATD*98*1#"};
 	static int dial_ok = -1;
-	static bool told;
+	char apn[64] = "", cmd[96];
 
-	if (!told) {
-		told = true;
-		modem_at("AT+CMEE=2", NULL, NULL, 1000);
-		modem_at_log("AT+CGDCONT?", 2000);
-		modem_at_log("AT+CGACT?", 2000);
-		modem_at_log("AT+CGATT?", 2000);
+	modem_at("AT+CMEE=2", NULL, NULL, 1000);
+	modem_at_log("AT+COPS?", 2000);
+	modem_at_log("AT+MIPCALL?", 2000);
+	modem_at_log("AT+CGACT?", 2000);
+	modem_at_log("AT+CGDCONT?", 2000);
+	/* ML307R: контекст 1 с APN — явно (APN тот, что дала сеть), затем ATD*99# */
+	line[0] = '\0';
+	if (modem_at("AT+CGDCONT?", "+CGDCONT: 1,", line, 2000) == ESP_OK) {
+		char *q = strchr(line, ',');
+
+		q = q ? strchr(q + 1, ',') : NULL; /* после "IP", */
+		if (q && q[1] == '"') {
+			char *end = strchr(q + 2, '"');
+
+			if (end && end - q - 2 < (int)sizeof(apn)) {
+				memcpy(apn, q + 2, end - q - 2);
+				apn[end - q - 2] = '\0';
+			}
+		}
 	}
+	/* APN, который сеть дописывает сама (".mnc..gprs"), — без хвоста */
+	char *tail = strstr(apn, ".mnc");
+
+	if (tail) {
+		*tail = '\0';
+	}
+	snprintf(cmd, sizeof(cmd), "AT+CGDCONT=1,\"IP\",\"%s\"", apn);
+	modem_at_log(cmd, 3000);
 	err = ESP_FAIL;
 	for (int k = 0; k < 4 && err; k++) {
 		int i = dial_ok >= 0 ? (dial_ok + k) % 4 : k;
