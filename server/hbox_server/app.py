@@ -63,6 +63,7 @@ STATUS_FIELDS = ("rec", "files", "pending", "dropped", "overflows", "rec_errors"
 FW_NAME = re.compile(r"^[0-9a-f]{8}\.bin$")
 FW_VERSION = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 FW_MAX = 0x1E0000  # слот прошивки (firmware/partitions.csv)
+FW_BLOCK = 32768  # устройство проверяет каждый блок по своей CRC до записи во флеш
 
 
 def fw_dir() -> Path:
@@ -272,13 +273,18 @@ async def config(request: Request):
 
 
 async def firmware_get(request: Request):
-    """Прошивка с offset: ?offset=&len= (устройство берёт всё сразу, после обрыва — остаток)."""
+    """Прошивка с offset: ?offset=&len= (устройство берёт всё сразу, после обрыва — остаток);
+    ?blocks=1 — CRC-32 каждого блока FW_BLOCK через запятую."""
     if not device_of(request):
         return error(401, "unknown device")
     name = request.path_params["name"]
     path = fw_dir() / name
     if not FW_NAME.match(name) or not path.is_file():
         return error(404, "no such firmware")
+    if request.query_params.get("blocks"):
+        blob = path.read_bytes()
+        crcs = (f"{zlib.crc32(blob[i:i + FW_BLOCK]):08x}" for i in range(0, len(blob), FW_BLOCK))
+        return PlainTextResponse(",".join(crcs))
     try:
         offset = int(request.query_params["offset"])
         length = int(request.query_params["len"])

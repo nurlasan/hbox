@@ -333,6 +333,8 @@ def test_ota_flow(site):
     assert site.get(fw, params={"offset": 0, "len": 10**7}, headers=AUTH).status_code == 400
     whole = site.get(fw, params={"offset": 100, "len": len(blob)}, headers=AUTH).content
     assert whole == blob[100:]  # остаток после обрыва — одним ответом
+    blocks = site.get(fw, params={"blocks": 1}, headers=AUTH).text.split(",")
+    assert blocks == [f"{zlib.crc32(blob[i:i + 32768]):08x}" for i in range(0, len(blob), 32768)]
     assert site.get("/hbox/v1/firmware/../devices.json", params={"offset": 0, "len": 9},
                     headers=AUTH).status_code == 404
     # обновилась — больше не предлагаем
