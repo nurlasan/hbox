@@ -44,7 +44,9 @@ static void sock_put(const uint8_t *p, size_t n)
 		size_t next = (rx_head + 1) % SOCK_RX;
 
 		if (next == rx_tail) {
-			return; /* ответы сервера маленькие; переполнение — ответ не разберётся */
+			/* ответ больше буфера — разобрать его не выйдет, запрос повторится */
+			printf("HBOX MODEM rx overflow, %u bytes lost\n", (unsigned)(n + 1));
+			return;
 		}
 		sock_rx[rx_head] = *p++;
 		rx_head = next;

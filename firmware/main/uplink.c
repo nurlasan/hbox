@@ -292,7 +292,8 @@ static int json_bool(const char *key, int def)
 
 /* --- обновление прошивки по воздуху (docs/protocol.md) --- */
 
-#define OTA_CHUNK 16384
+/* ответ с куском (+ заголовки) обязан влезть в приёмный буфер модема SOCK_RX (16 КБ) целиком */
+#define OTA_CHUNK 8192
 /* не получилось — следующая попытка не раньше чем через столько */
 #define OTA_RETRY_US (30 * 60 * 1000000LL)
 
