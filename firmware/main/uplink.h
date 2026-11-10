@@ -12,7 +12,7 @@
 void uplink_start(struct settings *s);
 
 struct uplink_stats {
-	const char *state; /* "token", "modem", "net", "ppp", "idle", "send", "ota", "wait" */
+	const char *state; /* "token", "modem", "net", "tls", "idle", "send", "wait" */
 	int csq;
 	uint32_t sent_files;
 	uint32_t sent_kb;

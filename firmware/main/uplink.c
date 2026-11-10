@@ -6,17 +6,12 @@
 #include <string.h>
 #include <time.h>
 #include <esp_app_desc.h>
-#include <esp_event.h>
-#include <esp_http_client.h>
-#include <esp_netif.h>
-#include <esp_netif_ppp.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_rom_crc.h>
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/event_groups.h>
 #include <freertos/task.h>
 
 #include "clock.h"
@@ -26,6 +21,9 @@
 
 #define SERVER "178.104.149.56"
 #define PORT 18443
+#define SOCK 0
+#define SSL_ID 1
+#define CA_NAME "hbox_ca.pem"
 #define CONFIG_EVERY_S (5 * 60)
 
 extern const char ca_pem_start[] asm("_binary_hbox_ca_pem_start");
@@ -34,8 +32,12 @@ extern const char ca_pem_end[] asm("_binary_hbox_ca_pem_end");
 static struct settings *cfg;
 static struct uplink_stats stats = {.state = "modem", .csq = -1};
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+static bool sock_open;
+/* nginx закрывает простаивающее соединение через 120 с — заранее открываем новое */
+static int64_t sock_used_us;
+#define SOCK_IDLE_US (100 * 1000000LL)
 /* тело запроса кусками из хранилища; ответ сервера */
-static uint8_t chunk[8192];
+static uint8_t chunk[MODEM_SEND_MAX];
 static char resp[1024];
 
 void uplink_get_stats(struct uplink_stats *st)
@@ -50,133 +52,13 @@ static void set_state(const char *s)
 	stats.state = s;
 }
 
-/*
- * --- PPP: модем — «труба» (ATD*99#), TCP и TLS — на ESP (lwIP, mbedTLS) ---
- *
- * Раньше TCP/TLS были внутри модема (AT+MIPOPEN), и байты между модемом и ESP по UART
- * изредка терялись без следа. В PPP у каждого кадра своя контрольная сумма: испорченный кадр
- * выбрасывается, TCP на ESP повторяет его сам.
- */
-
-#define NET_UP BIT0
-#define NET_DOWN BIT1
-
-static esp_netif_t *ppp;
-static EventGroupHandle_t net_ev;
-static volatile bool ppp_rx_on;
-
-static struct {
-	esp_netif_driver_base_t base;
-} ppp_drv;
-
-static esp_err_t ppp_transmit(void *h, void *buffer, size_t len)
-{
-	modem_raw_write(buffer, len);
-	return ESP_OK;
-}
-
-static esp_err_t ppp_post_attach(esp_netif_t *netif, void *args)
-{
-	esp_netif_driver_ifconfig_t ifc = {.handle = &ppp_drv, .transmit = ppp_transmit};
-
-	ppp_drv.base.netif = netif;
-	return esp_netif_set_driver_config(netif, &ifc);
-}
-
-static void on_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-	if (id == IP_EVENT_PPP_GOT_IP) {
-		ip_event_got_ip_t *ev = data;
-
-		printf("HBOX UP ppp up, ip " IPSTR "\n", IP2STR(&ev->ip_info.ip));
-		xEventGroupClearBits(net_ev, NET_DOWN);
-		xEventGroupSetBits(net_ev, NET_UP);
-	} else if (id == IP_EVENT_PPP_LOST_IP) {
-		printf("HBOX UP ppp lost ip\n");
-		xEventGroupClearBits(net_ev, NET_UP);
-		xEventGroupSetBits(net_ev, NET_DOWN);
-	}
-}
-
-static void on_ppp(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-	/* ошибки PPP — меньше NETIF_PP_PHASE_OFFSET; 0 — нет ошибки */
-	if (id > NETIF_PPP_ERRORNONE && id < NETIF_PP_PHASE_OFFSET) {
-		printf("HBOX UP ppp error %ld\n", (long)id);
-		xEventGroupClearBits(net_ev, NET_UP);
-		xEventGroupSetBits(net_ev, NET_DOWN);
-	}
-}
-
-/* из UART в lwIP, пока модем в режиме данных */
-static void ppp_rx_task(void *arg)
-{
-	static uint8_t buf[1024];
-
-	for (;;) {
-		if (!ppp_rx_on) {
-			vTaskDelay(pdMS_TO_TICKS(50));
-			continue;
-		}
-		int n = modem_raw_read(buf, sizeof(buf), 20);
-
-		if (n > 0 && ppp_rx_on) {
-			esp_netif_receive(ppp, buf, n, NULL);
-		}
-	}
-}
-
-static void ppp_init(void)
-{
-	esp_netif_config_t ncfg = ESP_NETIF_DEFAULT_PPP();
-	esp_netif_ppp_config_t pcfg = {.ppp_phase_event_enabled = false, .ppp_error_event_enabled = true};
-	esp_err_t err;
-
-	ESP_ERROR_CHECK(esp_netif_init());
-	err = esp_event_loop_create_default();
-	if (err && err != ESP_ERR_INVALID_STATE) {
-		ESP_ERROR_CHECK(err);
-	}
-	net_ev = xEventGroupCreate();
-	ppp = esp_netif_new(&ncfg);
-	ppp_drv.base.post_attach = ppp_post_attach;
-	ESP_ERROR_CHECK(esp_netif_attach(ppp, &ppp_drv));
-	esp_netif_ppp_set_params(ppp, &pcfg);
-	ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, on_ip, NULL));
-	ESP_ERROR_CHECK(esp_event_handler_register(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, on_ppp, NULL));
-	xTaskCreatePinnedToCore(ppp_rx_task, "ppp_rx", 4096, NULL, 6, NULL, 0);
-}
-
-static esp_http_client_handle_t hc;
-
-static void http_drop(void)
-{
-	if (hc) {
-		esp_http_client_cleanup(hc);
-		hc = NULL;
-	}
-}
-
-static void ppp_down(void)
-{
-	http_drop();
-	if (ppp_rx_on) {
-		esp_netif_action_stop(ppp, NULL, 0, NULL);
-		vTaskDelay(pdMS_TO_TICKS(2000)); /* LCP terminate — модем отвечает, приём ещё нужен */
-		ppp_rx_on = false;
-		modem_hangup();
-	}
-	xEventGroupClearBits(net_ev, NET_UP);
-}
-
-/* --- модем и связь --- */
+/* --- модем и TLS --- */
 
 static esp_err_t modem_setup(void)
 {
-	char line[MODEM_LINE_MAX];
+	char line[MODEM_LINE_MAX], cmd[96];
 	esp_err_t err;
 
-	ppp_down();
 	set_state("modem");
 	err = modem_open();
 	if (err) {
@@ -200,38 +82,60 @@ static esp_err_t modem_setup(void)
 	if (modem_at("AT+CSQ", "+CSQ:", line, 1000) == ESP_OK) {
 		stats.csq = atoi(line + 6);
 	}
-	/* интернет модема для его собственного TCP больше не нужен — PPP берёт контекст на себя */
+	/* мобильный интернет: обычно включается сам */
 	line[0] = '\0';
 	modem_at("AT+MIPCALL?", "+MIPCALL:", line, 2000);
-	if (strstr(line, "+MIPCALL: 1,1")) {
-		modem_at("AT+MIPCALL=0,1", NULL, NULL, 5000);
-		vTaskDelay(pdMS_TO_TICKS(1000));
+	if (!strstr(line, "+MIPCALL: 1,1")) {
+		modem_at("AT+MIPCALL=1,1", NULL, NULL, 5000);
+		modem_wait("+MIPCALL:", line, 30000);
 	}
 
-	set_state("ppp");
-	err = modem_dial(line);
+	/* TLS с проверкой сервера по нашему CA */
+	set_state("tls");
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",0,%u", CA_NAME,
+		 (unsigned)strlen(ca_pem_start));
+	err = modem_at_data(cmd, ca_pem_start, strlen(ca_pem_start), 5000);
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"auth\",%d,1", SSL_ID);
+	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"cert\",%d,\"%s\"", SSL_ID, CA_NAME);
+	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	snprintf(cmd, sizeof(cmd), "AT+MIPCFG=\"ssl\",%d,1,%d", SOCK, SSL_ID);
+	err = err ?: modem_at(cmd, NULL, NULL, 2000);
 	if (err) {
-		printf("HBOX UP dial failed: %s\n", line);
-		return err;
+		printf("HBOX UP tls setup failed\n");
 	}
-	xEventGroupClearBits(net_ev, NET_UP | NET_DOWN);
-	ppp_rx_on = true;
-	esp_netif_action_start(ppp, NULL, 0, NULL);
-	EventBits_t bits = xEventGroupWaitBits(net_ev, NET_UP | NET_DOWN, pdFALSE, pdFALSE,
-					       pdMS_TO_TICKS(30000));
-	if (!(bits & NET_UP)) {
-		printf("HBOX UP ppp did not come up\n");
-		ppp_down();
+	return err;
+}
+
+static void sock_close(void)
+{
+	char cmd[24];
+
+	snprintf(cmd, sizeof(cmd), "AT+MIPCLOSE=%d", SOCK);
+	modem_at(cmd, NULL, NULL, 5000);
+	sock_open = false;
+}
+
+static esp_err_t sock_connect(void)
+{
+	char cmd[80], line[MODEM_LINE_MAX] = "";
+
+	if (sock_open && !modem_sock_closed() && esp_timer_get_time() - sock_used_us < SOCK_IDLE_US) {
+		return ESP_OK;
+	}
+	sock_close();
+	modem_sock_reset();
+	snprintf(cmd, sizeof(cmd), "AT+MIPOPEN=%d,\"TCP\",\"%s\",%d,60,0", SOCK, SERVER, PORT);
+	if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+MIPOPEN:", line, 70000) != ESP_OK ||
+	    !strstr(line, ",0")) {
+		printf("HBOX UP connect failed %s\n", line);
 		return ESP_FAIL;
 	}
+	sock_open = true;
 	return ESP_OK;
 }
 
-/* --- HTTPS (esp_http_client поверх PPP) --- */
-
-/* nginx закрывает простаивающее соединение через 75–120 с — заранее открываем новое */
-#define HTTP_IDLE_US (60 * 1000000LL)
-static int64_t http_used_us;
+/* --- HTTP поверх сокета --- */
 
 /* Приёмник тела ответа по мере прихода (прошивка — сразу во флеш); false — прервать. */
 typedef bool (*http_sink)(const uint8_t *data, size_t len, void *ctx);
@@ -244,93 +148,95 @@ typedef bool (*http_sink)(const uint8_t *data, size_t len, void *ctx);
 static int http_ex(const char *method, const char *path, struct store_file *f, uint32_t body_off,
 		   uint32_t body_len, http_sink sink, void *ctx)
 {
-	char url[384], auth[80];
-	int code, n;
-	size_t have = 0;
+	char head[768];
+	size_t have = 0, need;
+	int code = -1, n;
+	char *body;
 
 	resp[0] = '\0';
-	if (!(xEventGroupGetBits(net_ev) & NET_UP)) {
+	if (sock_connect() != ESP_OK) {
 		return -1;
 	}
-	if (snprintf(url, sizeof(url), "https://%s:%d%s", SERVER, PORT, path) >= (int)sizeof(url)) {
+	n = snprintf(head, sizeof(head),
+		     "%s %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"
+		     "Content-Length: %u\r\nContent-Type: application/octet-stream\r\n\r\n",
+		     method, path, SERVER, cfg->token, (unsigned)body_len);
+	if (n >= (int)sizeof(head)) {
 		return -1;
 	}
-	if (hc && esp_timer_get_time() - http_used_us > HTTP_IDLE_US) {
-		http_drop();
-	}
-	if (!hc) {
-		esp_http_client_config_t hcfg = {
-			.url = url,
-			.cert_pem = ca_pem_start,
-			.timeout_ms = 30000,
-			.keep_alive_enable = true,
-			.buffer_size = 2048,
-			.buffer_size_tx = 1024,
-		};
-
-		hc = esp_http_client_init(&hcfg);
-		if (!hc) {
-			return -1;
-		}
-	} else {
-		esp_http_client_set_url(hc, url);
-	}
-	snprintf(auth, sizeof(auth), "Bearer %s", cfg->token);
-	esp_http_client_set_method(hc, strcmp(method, "PUT") == 0 ? HTTP_METHOD_PUT : HTTP_METHOD_GET);
-	esp_http_client_set_header(hc, "Authorization", auth);
-	esp_http_client_set_header(hc, "Content-Type", "application/octet-stream");
-	if (esp_http_client_open(hc, body_len) != ESP_OK) {
+	if (modem_sock_send(SOCK, head, n, 30000) != ESP_OK) {
 		goto broken;
 	}
+	/* 8 КБ модем принимает за доли секунды; 10 с без OK — он потерял байты и ждёт остаток */
 	for (uint32_t off = 0; off < body_len;) {
 		size_t len = store_read(f, body_off + off, chunk,
 					body_len - off < sizeof(chunk) ? body_len - off : sizeof(chunk));
 
-		if (!len) {
+		if (!len || modem_sock_send(SOCK, chunk, len, 10000) != ESP_OK) {
 			goto broken;
-		}
-		for (size_t done = 0; done < len;) {
-			n = esp_http_client_write(hc, (const char *)chunk + done, len - done);
-			if (n <= 0) {
-				goto broken;
-			}
-			done += n;
 		}
 		off += len;
 	}
-	if (esp_http_client_fetch_headers(hc) < 0) {
+
+	/* заголовки ответа, затем тело по Content-Length; сервер отвечает сразу — 15 с без ответа значит,
+	 * до него дошло не всё (модем потерял кусок), ждать дальше бесполезно */
+	while (!(body = strstr(resp, "\r\n\r\n"))) {
+		if (have >= sizeof(resp) - 1) {
+			goto broken;
+		}
+		n = modem_sock_recv(resp + have, sizeof(resp) - 1 - have, 15000);
+		if (n <= 0) {
+			goto broken;
+		}
+		have += n;
+		resp[have] = '\0';
+	}
+	if (sscanf(resp, "HTTP/1.%*d %d", &code) != 1) {
 		goto broken;
 	}
-	code = esp_http_client_get_status_code(hc);
-	for (;;) {
-		if (sink) {
-			n = esp_http_client_read(hc, (char *)chunk, sizeof(chunk));
-			if (n < 0 || (n > 0 && code == 200 && !sink(chunk, n, ctx))) {
+	char *cl = strcasestr(resp, "\r\nContent-Length:");
+
+	body += 4;
+	if (sink) {
+		/* тело потоком: что пришло вместе с заголовками, и остальное прямо из сокета */
+		size_t clen = cl ? strtoul(cl + 17, NULL, 10) : 0, got = have - (body - resp);
+
+		if (got > clen || (code == 200 && got && !sink((uint8_t *)body, got, ctx))) {
+			goto broken;
+		}
+		while (got < clen) {
+			n = modem_sock_recv(chunk, clen - got < sizeof(chunk) ? clen - got : sizeof(chunk), 15000);
+			if (n <= 0 || (code == 200 && !sink(chunk, n, ctx))) {
 				goto broken;
 			}
-		} else {
-			n = esp_http_client_read(hc, resp + have, sizeof(resp) - 1 - have);
-			if (n < 0) {
-				goto broken;
-			}
-			have += n;
-			resp[have] = '\0';
-			if (have == sizeof(resp) - 1) {
-				break;
-			}
+			got += n;
 		}
-		if (n == 0) {
-			break;
+		if (strcasestr(resp, "\r\nConnection: close")) {
+			sock_close();
 		}
+		resp[0] = '\0';
+		sock_used_us = esp_timer_get_time();
+		return code;
 	}
-	if (!esp_http_client_is_complete_data_received(hc)) {
-		goto broken;
+	need = (body - resp) + (cl ? strtoul(cl + 17, NULL, 10) : 0);
+	while (have < need && have < sizeof(resp) - 1) {
+		n = modem_sock_recv(resp + have, sizeof(resp) - 1 - have, 15000);
+		if (n <= 0) {
+			goto broken;
+		}
+		have += n;
+		resp[have] = '\0';
 	}
-	http_used_us = esp_timer_get_time();
+	if (strcasestr(resp, "\r\nConnection: close")) {
+		sock_close();
+	}
+	memmove(resp, body, strlen(body) + 1);
+	sock_used_us = esp_timer_get_time();
 	return code;
 
 broken:
-	http_drop();
+	sock_close();
+	resp[0] = '\0';
 	return -1;
 }
 
@@ -387,6 +293,7 @@ static int json_bool(const char *key, int def)
 
 /* --- обновление прошивки по воздуху (docs/protocol.md) --- */
 
+/* ответ с куском (+ заголовки) обязан влезть в приёмный буфер модема SOCK_RX (16 КБ) целиком */
 /* не получилось — следующая попытка не раньше чем через столько */
 #define OTA_RETRY_US (10 * 60 * 1000000LL)
 
@@ -851,6 +758,7 @@ static void task(void *arg)
 			continue;
 		}
 		if (!ready || failures >= 5) {
+			sock_open = false;
 			ready = modem_setup() == ESP_OK;
 			failures = 0;
 			if (!ready) {
@@ -902,6 +810,5 @@ void uplink_start(struct settings *s)
 {
 	cfg = s;
 	ota_init();
-	ppp_init();
 	xTaskCreatePinnedToCore(task, "uplink", 8192, NULL, 5, NULL, 0);
 }

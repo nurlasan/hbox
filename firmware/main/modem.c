@@ -228,63 +228,6 @@ static bool probe(void)
 	return false;
 }
 
-/*
- * Модем мог остаться в режиме данных PPP (ESP перезагрузилась посреди связи, например после
- * обновления): там он на «AT» не отвечает. +++ с паузами возвращает его в команды.
- */
-static void escape_data(void)
-{
-	for (int swap = 0; swap < 2; swap++) {
-		set_port(MODEM_BAUD, swap);
-		vTaskDelay(pdMS_TO_TICKS(1100));
-		tx("+++", 3);
-		vTaskDelay(pdMS_TO_TICKS(1100));
-		if (modem_at("ATH", NULL, NULL, 1000) == ESP_OK) {
-			return;
-		}
-	}
-}
-
-esp_err_t modem_dial(char *out)
-{
-	int64_t until = deadline(30000);
-	char line[MODEM_LINE_MAX];
-
-	out[0] = '\0';
-	uart_flush_input(UART);
-	tx_str("ATD*99#\r\n");
-	while (read_line(line, until) == ESP_OK) {
-		if (starts(line, "CONNECT")) {
-			return ESP_OK;
-		}
-		if (is_error(line) || starts(line, "NO CARRIER") || starts(line, "BUSY")) {
-			strcpy(out, line);
-			return ESP_FAIL;
-		}
-	}
-	strcpy(out, "timeout");
-	return ESP_ERR_TIMEOUT;
-}
-
-void modem_raw_write(const void *data, size_t len)
-{
-	tx(data, len);
-}
-
-int modem_raw_read(void *buf, size_t len, int timeout_ms)
-{
-	return uart_read_bytes(UART, buf, len, pdMS_TO_TICKS(timeout_ms));
-}
-
-void modem_hangup(void)
-{
-	vTaskDelay(pdMS_TO_TICKS(1100));
-	tx("+++", 3);
-	vTaskDelay(pdMS_TO_TICKS(1100));
-	uart_flush_input(UART);
-	modem_at("ATH", NULL, NULL, 3000);
-}
-
 esp_err_t modem_open(void)
 {
 	static const int rates[] = {115200, 921600, MODEM_BAUD};
@@ -304,9 +247,6 @@ esp_err_t modem_open(void)
 	}
 	/* модем после включения просыпается до ~10 с */
 	for (int round = 0; round < 5 && !found; round++) {
-		if (round == 1) {
-			escape_data();
-		}
 		for (int i = 0; i < 6 && !found; i++) {
 			set_port(rates[i % 3], i >= 3);
 			found = probe();
