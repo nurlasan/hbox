@@ -271,6 +271,28 @@ esp_err_t modem_dial(const char *cmd, char *out)
 	uart_flush_input(UART);
 	tx_str(cmd);
 	tx_str("\r\n");
+	if (starts(cmd, "AT+CGDATA")) {
+		/* ML307R на CGDATA не пишет CONNECT, а молча переходит в данные и ждёт LCP от нас:
+		 * 3 с тишины или кадры PPP (0x7E) — режим данных. Что пришло — в лог. */
+		uint8_t buf[64];
+		int n = uart_read_bytes(UART, buf, sizeof(buf), pdMS_TO_TICKS(3000));
+		char hex[3 * sizeof(buf) + 1] = "";
+
+		for (int i = 0; i < n; i++) {
+			snprintf(hex + 3 * i, 4, "%02x ", buf[i]);
+		}
+		printf("HBOX MODEM %s -> %d bytes: %s\n", cmd, n, hex);
+		if (n <= 0 || memchr(buf, 0x7e, n)) {
+			return ESP_OK;
+		}
+		for (int i = 0; i + 7 <= n; i++) {
+			if (memcmp(buf + i, "CONNECT", 7) == 0) {
+				return ESP_OK;
+			}
+		}
+		snprintf(out, MODEM_LINE_MAX, "%.*s", n, (char *)buf);
+		return ESP_FAIL;
+	}
 	while (read_line(line, until) == ESP_OK) {
 		if (starts(line, "CONNECT")) {
 			return ESP_OK;
