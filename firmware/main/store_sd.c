@@ -1,7 +1,8 @@
 /*
  * Хранилище на microSD (модуль YS-41 по SPI): часовые файлы лежат на карте до подтверждения сервером,
- * потом переезжают в sent/ и хранятся там 7 дней (ТЗ п. 4). Места не хватает — сначала удаляются
- * самые старые отправленные, и только потом неотправленные.
+ * потом остаются на месте 7 дней (ТЗ п. 4) с атрибутом «только чтение» — так видно, что файл отправлен,
+ * и после перезагрузки его не шлём заново. Места не хватает — сначала удаляются самые старые
+ * отправленные, и только потом неотправленные.
  *
  * Запись карты бывает медленной (до сотен мс на кадр FAT), а у микрофона буфер ~0,5 с — поэтому
  * recorder кладёт данные в кольцо в PSRAM, а на карту их пишет отдельная задача.
@@ -34,6 +35,8 @@
 #include <sdmmc_cmd.h>
 
 #include "clock.h"
+#include "diskio_sdmmc.h"
+#include "ff.h"
 
 #define PIN_CS 10
 #define PIN_SCK 11
@@ -42,7 +45,6 @@
 
 #define MOUNT "/sd"
 #define SD_DIR MOUNT "/hbox"
-#define SENT_DIR SD_DIR "/sent"
 #define SENT_KEEP_S (7 * 86400)
 #define FILES_MAX 256
 #define NAME_MAX_LEN 128
@@ -78,6 +80,8 @@ static RingbufHandle_t ring;
 static sdmmc_card_t *card;
 static uint32_t seq, dropped;
 static char channel[33] = "hbox";
+/* диск FatFs карты ("0:") — атрибуты файлов VFS не умеет, ставим их через FatFs */
+static char drv[4];
 /* последняя ошибка карты: после неё новый файл — не раньше чем через FAIL_PAUSE_US */
 static volatile int64_t failed_us;
 #define FAIL_PAUSE_US 10000000LL
@@ -198,7 +202,7 @@ static bool mount(void)
 		return false;
 	}
 	mkdir(SD_DIR, 0775);
-	mkdir(SENT_DIR, 0775);
+	snprintf(drv, sizeof(drv), "%d:", ff_diskio_get_pdrv_card(card));
 	printf("HBOX SD %s %llu MB\n", card->cid.name,
 	       (unsigned long long)card->csd.capacity * card->csd.sector_size / (1024 * 1024));
 	return true;
@@ -241,28 +245,49 @@ static bool drop_oldest(void)
 	return true;
 }
 
-/* Самый старый файл в sent/: имя в out; false — пусто. */
+/* /sd/hbox/x → 0:/hbox/x для FatFs */
+static void ff_path(const char *path, char *out, size_t cap)
+{
+	snprintf(out, cap, "%s%s", drv, path + strlen(MOUNT));
+}
+
+static bool is_sent(const char *path)
+{
+	static FILINFO fi;
+	char p[PATH_LEN];
+
+	ff_path(path, p, sizeof(p));
+	return f_stat(p, &fi) == FR_OK && (fi.fattrib & AM_RDO);
+}
+
+/* Самый старый отправленный (только чтение): путь в out; false — нет таких. */
 static bool oldest_sent(long long *utc, char *out, size_t cap)
 {
-	DIR *d = opendir(SENT_DIR);
-	struct dirent *e;
+	static FF_DIR dir;
+	static FILINFO fi;
+	char p[PATH_LEN];
 	bool found = false;
 
-	if (!d) {
+	ff_path(SD_DIR, p, sizeof(p));
+	if (f_opendir(&dir, p) != FR_OK) {
 		return false;
 	}
-	while ((e = readdir(d))) {
+	while (f_readdir(&dir, &fi) == FR_OK && fi.fname[0]) {
 		char chan[33];
 		const char *rest;
-		long long t = parse_name(e->d_name, chan, sizeof(chan), &rest);
+		long long t;
 
+		if (!(fi.fattrib & AM_RDO) || (fi.fattrib & AM_DIR)) {
+			continue;
+		}
+		t = parse_name(fi.fname, chan, sizeof(chan), &rest);
 		if (t > 0 && (!found || t < *utc)) {
 			*utc = t;
-			snprintf(out, cap, SENT_DIR "/%s", e->d_name);
+			snprintf(out, cap, SD_DIR "/%s", fi.fname);
 			found = true;
 		}
 	}
-	closedir(d);
+	f_closedir(&dir);
 	return found;
 }
 
@@ -271,7 +296,7 @@ static void prune_sent(void)
 {
 	int64_t now = clock_now();
 	long long utc;
-	char path[300];
+	char path[300], p[PATH_LEN];
 
 	while (oldest_sent(&utc, path, sizeof(path))) {
 		bool old = now && utc < now - SENT_KEEP_S;
@@ -279,6 +304,8 @@ static void prune_sent(void)
 		if (!old && free_bytes() >= KEEP_FREE) {
 			break;
 		}
+		ff_path(path, p, sizeof(p));
+		f_chmod(p, 0, AM_RDO);
 		if (unlink(path)) {
 			printf("HBOX SD ERROR remove %s\n", path);
 			break;
@@ -410,10 +437,10 @@ static void scan(void)
 		long long utc;
 		struct stat st;
 
-		if (strcmp(e->d_name, "sent") == 0) {
+		snprintf(path, sizeof(path), SD_DIR "/%s", e->d_name);
+		if (is_sent(path)) {
 			continue;
 		}
-		snprintf(path, sizeof(path), SD_DIR "/%s", e->d_name);
 		utc = parse_name(e->d_name, chan, sizeof(chan), &rest);
 		if (sscanf(rest, "%3[a-z0-9].%5s", ext, part) < 1 || utc <= 0 ||
 		    (strcmp(ext, "mp3") && strcmp(ext, "m4a")) || (part[0] && strcmp(part, "part")) ||
@@ -621,7 +648,7 @@ size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len)
 
 void store_sent(struct store_file *f)
 {
-	char path[PATH_LEN], name[NAME_MAX_LEN], to[PATH_LEN];
+	char path[PATH_LEN], p[PATH_LEN];
 
 	if (rd_f == f) {
 		fclose(rd);
@@ -630,11 +657,10 @@ void store_sent(struct store_file *f)
 	}
 	xSemaphoreTake(lock, portMAX_DELAY);
 	path_of(f, false, path, sizeof(path));
-	name_of(f, name, sizeof(name));
-	snprintf(to, sizeof(to), SENT_DIR "/%s", name);
-	if (rename(path, to)) {
-		printf("HBOX SD ERROR keep %s\n", path);
-		unlink(path);
+	ff_path(path, p, sizeof(p));
+	if (f_chmod(p, AM_RDO, AM_RDO) != FR_OK) {
+		/* не пометили — после перезагрузки сервер просто ответит, что файл уже есть */
+		printf("HBOX SD ERROR mark sent %s\n", path);
 	}
 	f->state = FREE;
 	xSemaphoreGive(lock);
