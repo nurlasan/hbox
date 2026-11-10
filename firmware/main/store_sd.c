@@ -1,5 +1,7 @@
 /*
- * Хранилище на microSD (модуль YS-41 по SPI): часовые файлы лежат на карте до подтверждения сервером.
+ * Хранилище на microSD (модуль YS-41 по SPI): часовые файлы лежат на карте до подтверждения сервером,
+ * потом переезжают в sent/ и хранятся там 7 дней (ТЗ п. 4). Места не хватает — сначала удаляются
+ * самые старые отправленные, и только потом неотправленные.
  *
  * Запись карты бывает медленной (до сотен мс на кадр FAT), а у микрофона буфер ~0,5 с — поэтому
  * recorder кладёт данные в кольцо в PSRAM, а на карту их пишет отдельная задача.
@@ -37,6 +39,8 @@
 
 #define MOUNT "/sd"
 #define SD_DIR MOUNT "/hbox"
+#define SENT_DIR SD_DIR "/sent"
+#define SENT_KEEP_S (7 * 86400)
 #define FILES_MAX 256
 /* 1 МБ — минута звука и весь moov часового m4a: запись не ждёт карту даже при её паузах */
 #define RING_BYTES (1024 * 1024)
@@ -124,6 +128,7 @@ static bool mount(void)
 		return false;
 	}
 	mkdir(SD_DIR, 0775);
+	mkdir(SENT_DIR, 0775);
 	printf("HBOX SD %s %llu MB\n", card->cid.name,
 	       (unsigned long long)card->csd.capacity * card->csd.sector_size / (1024 * 1024));
 	return true;
@@ -166,6 +171,50 @@ static bool drop_oldest(void)
 	return true;
 }
 
+/* Самый старый файл в sent/: имя в out; false — пусто. */
+static bool oldest_sent(long long *utc, char *out, size_t cap)
+{
+	DIR *d = opendir(SENT_DIR);
+	struct dirent *e;
+	bool found = false;
+
+	if (!d) {
+		return false;
+	}
+	while ((e = readdir(d))) {
+		long long t;
+
+		if (sscanf(e->d_name, "%lld.", &t) == 1 && t > 0 && (!found || t < *utc)) {
+			*utc = t;
+			snprintf(out, cap, SENT_DIR "/%s", e->d_name);
+			found = true;
+		}
+	}
+	closedir(d);
+	return found;
+}
+
+/* Удалить отправленные старше 7 дней, а при нехватке места — самые старые из них. */
+static void prune_sent(void)
+{
+	int64_t now = clock_now();
+	long long utc;
+	char path[300];
+
+	while (oldest_sent(&utc, path, sizeof(path))) {
+		bool old = now && utc < now - SENT_KEEP_S;
+
+		if (!old && free_bytes() >= KEEP_FREE) {
+			break;
+		}
+		if (unlink(path)) {
+			printf("HBOX SD ERROR remove %s\n", path);
+			break;
+		}
+		printf("HBOX SD removed %s (%s)\n", path, old ? "7 days" : "space");
+	}
+}
+
 /* Время начала пришло позже, чем файл начался: переименовать u<номер> в <UTC>. */
 static void name_late(struct store_file *f)
 {
@@ -197,6 +246,7 @@ static void writer(void *arg)
 
 		switch (op->type) {
 		case OP_CREATE:
+			prune_sent();
 			xSemaphoreTake(lock, portMAX_DELAY);
 			while (free_bytes() < KEEP_FREE && drop_oldest()) {
 			}
@@ -287,6 +337,9 @@ static void scan(void)
 		long long utc = 0;
 		struct stat st;
 
+		if (strcmp(e->d_name, "sent") == 0) {
+			continue;
+		}
 		snprintf(path, sizeof(path), SD_DIR "/%s", e->d_name);
 		if (sscanf(e->d_name, "%lld.%3[a-z0-9].%5s", &utc, ext, part) < 2 || utc <= 0 ||
 		    (strcmp(ext, "mp3") && strcmp(ext, "m4a")) || (part[0] && strcmp(part, "part")) ||
@@ -492,7 +545,7 @@ size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len)
 
 void store_sent(struct store_file *f)
 {
-	char path[48];
+	char path[48], to[64];
 
 	if (rd_f == f) {
 		fclose(rd);
@@ -501,7 +554,11 @@ void store_sent(struct store_file *f)
 	}
 	xSemaphoreTake(lock, portMAX_DELAY);
 	path_of(f, false, path, sizeof(path));
-	unlink(path);
+	snprintf(to, sizeof(to), SENT_DIR "/%lld.%s", f->info.start_utc, f->ext);
+	if (rename(path, to)) {
+		printf("HBOX SD ERROR keep %s\n", path);
+		unlink(path);
+	}
 	f->state = FREE;
 	xSemaphoreGive(lock);
 }

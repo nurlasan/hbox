@@ -1,7 +1,8 @@
 /*
  * Хранилище записанных файлов до отправки.
  *
- * На microSD (store_sd.c): часовые файлы лежат до подтверждения сервером, переживают перезагрузку.
+ * На microSD (store_sd.c): часовые файлы лежат до подтверждения сервером, переживают перезагрузку;
+ * отправленные хранятся ещё 7 дней (при нехватке места удаляются первыми).
  *
  * Файл пишет recorder (create → write/pwrite → close), отправляет uplink (next → read → sent).
  */
@@ -39,7 +40,7 @@ void store_close(struct store_file *f);
 /* Самый старый готовый к отправке файл или NULL; в info — размер и CRC-32. */
 struct store_file *store_next(struct store_info *info);
 size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len);
-/* Сервер подтвердил файл целиком — место освобождается. */
+/* Сервер подтвердил файл целиком — файл уходит в архив отправленных на 7 дней. */
 void store_sent(struct store_file *f);
 
 uint32_t store_pending(void);
