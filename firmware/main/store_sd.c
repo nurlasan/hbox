@@ -70,6 +70,8 @@ static uint32_t seq, dropped;
 /* последняя ошибка карты: после неё новый файл — не раньше чем через FAIL_PAUSE_US */
 static volatile int64_t failed_us;
 #define FAIL_PAUSE_US 10000000LL
+/* FAT пишет размер файла в каталог только при fsync/закрытии: без этого при выключении пропал бы час */
+#define SYNC_EVERY_US 10000000LL
 /* запись: копится по STAGE_BYTES и одним куском уходит в кольцо */
 static struct {
 	struct op op;
@@ -185,6 +187,7 @@ static void writer(void *arg)
 {
 	FILE *out = NULL;
 	char path[48], final[48];
+	int64_t synced_us = 0;
 
 	for (;;) {
 		size_t len;
@@ -209,6 +212,11 @@ static void writer(void *arg)
 		case OP_WRITE:
 			if (out && fwrite(op->data, 1, n, out) == n) {
 				f->info.size += n;
+				if (esp_timer_get_time() - synced_us >= SYNC_EVERY_US) {
+					fflush(out);
+					fsync(fileno(out));
+					synced_us = esp_timer_get_time();
+				}
 			} else if (!f->failed) {
 				f->failed = true;
 				failed_us = esp_timer_get_time();
