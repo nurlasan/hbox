@@ -360,6 +360,24 @@ static void writer(void *arg)
 			}
 			break;
 		case OP_WRITE:
+			/* время пришло после начала файла: u<номер> — сразу в настоящее имя, а не в конце часа,
+			 * иначе перезагрузка до конца часа оставит u<номер>, который при включении удаляется */
+			if (out && !f->info.start_utc && clock_valid()) {
+				struct store_file tmp = *f;
+				char named[PATH_LEN];
+
+				tmp.info.start_utc = clock_at(f->info.start_us);
+				path_of(&tmp, true, named, sizeof(named));
+				fclose(out);
+				if (rename(path, named) == 0) {
+					xSemaphoreTake(lock, portMAX_DELAY);
+					f->info.start_utc = tmp.info.start_utc;
+					xSemaphoreGive(lock);
+					strcpy(path, named);
+					printf("HBOX SD named %s\n", path);
+				}
+				out = fopen(path, "ab");
+			}
 			if (out && fwrite(op->data, 1, n, out) == n) {
 				f->info.size += n;
 				if (esp_timer_get_time() - synced_us >= SYNC_EVERY_US) {
