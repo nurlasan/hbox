@@ -444,6 +444,9 @@ static bool flush_stage(void)
 
 /* --- при включении: что осталось на карте --- */
 
+static bool scanned;
+
+/* Один раз после подключения карты; под lock (uplink уже может спрашивать store_next). */
 static void scan(void)
 {
 	DIR *d = opendir(SD_DIR);
@@ -497,6 +500,7 @@ static void scan(void)
 		files[i].seq = rank;
 	}
 	seq = n;
+	scanned = true;
 	printf("HBOX SD %d files to send\n", n);
 }
 
@@ -509,10 +513,16 @@ bool store_init(void)
 		return false;
 	}
 	xTaskCreatePinnedToCore(writer, "sd", 4096, NULL, 8, NULL, 0);
-	if (!mount()) {
+	/* после программной перезагрузки (обновление) карта отвечает не с первого раза */
+	for (int i = 0; i < 3 && !mount(); i++) {
+		vTaskDelay(pdMS_TO_TICKS(300));
+	}
+	if (!card) {
 		return false;
 	}
+	xSemaphoreTake(lock, portMAX_DELAY);
 	scan();
+	xSemaphoreGive(lock);
 	return true;
 }
 
@@ -534,6 +544,10 @@ struct store_file *store_create(int64_t start_us, int64_t start_utc, const char 
 		return NULL;
 	}
 	xSemaphoreTake(lock, portMAX_DELAY);
+	/* карта нашлась позже store_init — прочитать, что на ней ждёт отправки */
+	if (!scanned) {
+		scan();
+	}
 	f = oldest(FREE);
 	if (!f && drop_oldest()) {
 		f = oldest(FREE);
