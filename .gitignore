@@ -21,5 +21,6 @@ __pycache__/
 
 # ключи и сертификаты сервера
 deploy/tls/
+deploy/tunnel.env
 .env
 data/

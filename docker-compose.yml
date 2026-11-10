@@ -1,5 +1,7 @@
 # Сервер Hbox на Hetzner 178.104.149.56. Снаружи открыт только 18443 (облачный файрвол):
 # там nginx снимает TLS и отдаёт /hbox/ серверу. Ключи TLS — deploy/tls/, токены — .env (не в git).
+# Сайт для людей — https://hbox.fabtech.uz через Cloudflare Tunnel (только /hbox/admin; токен туннеля —
+# deploy/tunnel.env, не в git). Устройства ходят напрямую на 18443: там наш CA, Cloudflare не нужен.
 services:
   proxy:
     image: nginx:alpine
@@ -23,6 +25,16 @@ services:
       HBOX_DATA: /data
     volumes:
       - ./data:/data
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "5m"
+
+  tunnel:
+    image: cloudflare/cloudflared:2025.9.1
+    depends_on: [server]
+    command: tunnel --no-autoupdate run
+    env_file: deploy/tunnel.env
     restart: unless-stopped
     logging:
       options:

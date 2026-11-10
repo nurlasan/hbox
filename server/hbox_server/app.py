@@ -30,7 +30,7 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
 from . import admin, devices
@@ -298,6 +298,8 @@ app = Starlette(
         Route("/hbox/v1/config", config, methods=["GET"]),
         Route("/hbox/speedtest", speedtest, methods=["POST"]),
         Mount("/hbox/admin", routes=admin.routes),
+        # https://hbox.fabtech.uz/ — сразу на сайт
+        Route("/", lambda request: RedirectResponse(admin.BASE + "/")),
     ],
     lifespan=lifespan,
 )
