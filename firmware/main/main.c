@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <driver/usb_serial_jtag.h>
+#include <esp_app_desc.h>
 #include <driver/usb_serial_jtag_vfs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -33,13 +34,14 @@ static void status(void)
 	uplink_get_stats(&up);
 	printf("HBOX STATUS time=%lld channel=%s rec=%d %s/%d files=%lu cpu=%lu.%lu%% overflows=%lu "
 	       "rec_errors=%lu | pending=%lu dropped=%lu | up=%s csq=%d sent=%lu files %lu KB "
-	       "last=%lu.%lu KB/s up_errors=%lu\n",
+	       "last=%lu.%lu KB/s up_errors=%lu fw=%s\n",
 	       now, settings.channel[0] ? settings.channel : "?", rec.recording, settings.format,
 	       settings.bitrate / 1000, (unsigned long)rec.files, (unsigned long)rec.cpu10 / 10,
 	       (unsigned long)rec.cpu10 % 10, (unsigned long)rec.overflows, (unsigned long)rec.errors,
 	       (unsigned long)store_pending(), (unsigned long)store_dropped(), up.state, up.csq,
 	       (unsigned long)up.sent_files, (unsigned long)up.sent_kb, (unsigned long)up.kbps10 / 10,
-	       (unsigned long)up.kbps10 % 10, (unsigned long)up.errors);
+	       (unsigned long)up.kbps10 % 10, (unsigned long)up.errors,
+	       esp_app_get_description()->version);
 }
 
 static void command(char *line)
