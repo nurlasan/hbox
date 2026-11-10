@@ -337,6 +337,7 @@ static void writer(void *arg)
 	FILE *out = NULL;
 	char path[PATH_LEN], final[PATH_LEN];
 	int64_t synced_us = 0;
+	bool named = false; /* переименовать после прихода времени — одна попытка на файл */
 
 	for (;;) {
 		size_t len;
@@ -352,6 +353,7 @@ static void writer(void *arg)
 			}
 			xSemaphoreGive(lock);
 			path_of(f, true, path, sizeof(path));
+			named = f->info.start_utc != 0;
 			out = fopen(path, "wb");
 			f->failed = !out;
 			if (!out) {
@@ -362,18 +364,19 @@ static void writer(void *arg)
 		case OP_WRITE:
 			/* время пришло после начала файла: u<номер> — сразу в настоящее имя, а не в конце часа,
 			 * иначе перезагрузка до конца часа оставит u<номер>, который при включении удаляется */
-			if (out && !f->info.start_utc && clock_valid()) {
+			if (out && !named && clock_valid()) {
 				struct store_file tmp = *f;
-				char named[PATH_LEN];
+				char to[PATH_LEN];
 
+				named = true;
 				tmp.info.start_utc = clock_at(f->info.start_us);
-				path_of(&tmp, true, named, sizeof(named));
+				path_of(&tmp, true, to, sizeof(to));
 				fclose(out);
-				if (rename(path, named) == 0) {
+				if (rename(path, to) == 0) {
 					xSemaphoreTake(lock, portMAX_DELAY);
 					f->info.start_utc = tmp.info.start_utc;
 					xSemaphoreGive(lock);
-					strcpy(path, named);
+					strcpy(path, to);
 					printf("HBOX SD named %s\n", path);
 				}
 				out = fopen(path, "ab");
