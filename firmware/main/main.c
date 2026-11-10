@@ -71,9 +71,9 @@ void app_main(void)
 		usb_serial_jtag_vfs_use_driver();
 	}
 	settings_load(&settings);
-	printf("HBOX start channel=%s token=%s format=%s bitrate=%d record=%d\n",
-	       settings.channel[0] ? settings.channel : "?", settings.token[0] ? "set" : "none",
-	       settings.format, settings.bitrate, settings.record);
+	printf("HBOX start fw=%s channel=%s token=%s format=%s bitrate=%d record=%d\n",
+	       esp_app_get_description()->version, settings.channel[0] ? settings.channel : "?",
+	       settings.token[0] ? "set" : "none", settings.format, settings.bitrate, settings.record);
 
 	store_set_channel(settings.channel);
 	if (!store_init()) {
