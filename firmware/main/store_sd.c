@@ -46,6 +46,7 @@
 #define SENT_KEEP_S (7 * 86400)
 #define FILES_MAX 256
 #define NAME_MAX_LEN 128
+#define PATH_LEN (NAME_MAX_LEN + 32)
 /* 1 МБ — минута звука и весь moov часового m4a: запись не ждёт карту даже при её паузах */
 #define RING_BYTES (1024 * 1024)
 #define STAGE_BYTES 4096
@@ -227,7 +228,7 @@ static struct store_file *oldest(enum state state)
 static bool drop_oldest(void)
 {
 	struct store_file *f = oldest(READY);
-	char path[NAME_MAX_LEN];
+	char path[PATH_LEN];
 
 	if (!f) {
 		return false;
@@ -289,7 +290,7 @@ static void prune_sent(void)
 /* Время начала пришло позже, чем файл начался: переименовать u<номер> в <UTC>. */
 static void name_late(struct store_file *f)
 {
-	char from[NAME_MAX_LEN], to[NAME_MAX_LEN];
+	char from[PATH_LEN], to[PATH_LEN];
 	int64_t t = f->info.start_utc ? 0 : clock_at(f->info.start_us);
 
 	if (!t) {
@@ -306,7 +307,7 @@ static void name_late(struct store_file *f)
 static void writer(void *arg)
 {
 	FILE *out = NULL;
-	char path[NAME_MAX_LEN], final[NAME_MAX_LEN];
+	char path[PATH_LEN], final[PATH_LEN];
 	int64_t synced_us = 0;
 
 	for (;;) {
@@ -429,7 +430,7 @@ static void scan(void)
 		strcpy(f->chan, chan);
 		f->info = (struct store_info){.start_utc = utc, .ext = f->ext, .size = st.st_size};
 		/* .part — mp3 оборвался при выключении, отправляем что успело записаться; старое имя — в новое */
-		char final[NAME_MAX_LEN];
+		char final[PATH_LEN];
 
 		path_of(f, false, final, sizeof(final));
 		if (strcmp(path, final) && rename(path, final)) {
@@ -595,7 +596,7 @@ struct store_file *store_next(struct store_info *info)
 
 size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len)
 {
-	char path[NAME_MAX_LEN];
+	char path[PATH_LEN];
 
 	if (offset >= f->info.size) {
 		return 0;
@@ -620,7 +621,7 @@ size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len)
 
 void store_sent(struct store_file *f)
 {
-	char path[NAME_MAX_LEN], name[NAME_MAX_LEN], to[NAME_MAX_LEN + 16];
+	char path[PATH_LEN], name[NAME_MAX_LEN], to[PATH_LEN];
 
 	if (rd_f == f) {
 		fclose(rd);
