@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import time
+import zlib
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -29,6 +30,7 @@ STATUS_TITLES = {
     "cpu": "кодирование, %", "sent": "отправлено файлов", "kbps": "скорость, КБ/с",
     "files": "записано файлов", "uptime": "работает, мин", "reset": "причина перезапуска",
     "pending_mb": "ждут отправки, МБ", "sd_free": "SD свободно", "sd_total": "SD всего",
+    "fw": "прошивка", "fw_bad": "не запустилась прошивка",
 }
 QUEUE_BAD_H = 6     # отправка отстаёт больше чем на столько часов записи
 SD_BAD_DAYS = 2     # места на карте меньше чем на столько дней записи
@@ -84,7 +86,32 @@ def health(dev: str, d: dict, now: float) -> tuple[list[str], list[str]]:
                      + (f" ({ago:.0f} ч назад)" if ago >= 1 else ""))
         if ago > 3 and st.get("pending"):
             problems.append(f"файлов не было {ago:.0f} ч")
+    ota = d.get("ota")
+    if ota and st.get("fw_bad") == ota["version"]:
+        problems.append(f"прошивка {ota['version']} не запустилась, работает {st.get('fw', '?')}")
     return lines, problems
+
+
+def firmware_box(dev: str, d: dict) -> str:
+    st, ota = d.get("status", {}), d.get("ota")
+    if not ota:
+        state = "обновлений не назначено"
+    elif st.get("fw") == ota["version"]:
+        state = f"обновлена до {esc(ota['version'])}"
+    elif st.get("fw_bad") == ota["version"]:
+        state = (f'<span class="bad">{esc(ota["version"])} не запустилась — устройство вернулось '
+                 f"на прежнюю</span>")
+    else:
+        state = (f"ждёт обновления до {esc(ota['version'])} ({ota['size'] // 1024} КБ): устройство "
+                 f"скачает при следующей связи (до 5 минут) и перезагрузится")
+    cancel = (f'<form method="post" action="{BASE}/device/{esc(dev)}/firmware" style="display:inline">'
+              f'<input type="hidden" name="cancel" value="1"><button>Отменить</button></form>'
+              if ota and st.get("fw") != ota["version"] else "")
+    return (f'<div class="box"><h2>Прошивка</h2><p>Сейчас: <b>{esc(st.get("fw", "?"))}</b> · {state} {cancel}</p>'
+            f'<form method="post" action="{BASE}/device/{esc(dev)}/firmware" enctype="multipart/form-data">'
+            f'<input type="file" name="firmware" accept=".bin" required> <button>Загрузить и обновить</button>'
+            f'</form><p class="muted">Файл hbox.bin из архива прошивки. Если новая прошивка не выйдет на '
+            f"связь, устройство само вернётся на прежнюю.</p></div>")
 
 STYLE = """
 body{font:15px/1.45 system-ui,sans-serif;margin:0;padding:16px;background:#f6f6f4;color:#222}
@@ -243,6 +270,7 @@ async def device(request: Request):
                   for n, size, _ in items[:48])
         for day, items in files_of(dev))
     msg = {"saved": "Сохранено. Устройство получит настройки в течение 5 минут.",
+           "ota": "Прошивка загружена. Устройство обновится при следующей связи (до 5 минут).",
            "added": "Устройство добавлено. Скачайте файл токена ниже и запустите его рядом с платой."}
     note = msg.get(request.query_params.get("msg", ""), "")
     lines, problems = health(dev, d, time.time())
@@ -263,7 +291,8 @@ async def device(request: Request):
         + "".join(f"<p>{esc(x)}</p>" for x in lines)
         + "".join(f'<p class="bad">{esc(x)}</p>' for x in problems)
         + f'<table style="width:auto">{status}</table></div>'
-        f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
+        + firmware_box(dev, d)
+        + f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
         f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>'
         f"{files or '<p class=muted>Файлов пока нет</p>'}")
     return page(f"Hbox — {dev}", body)
@@ -292,6 +321,35 @@ async def device_save(request: Request):
     devices.update(dev, record=bool(form.get("record")), format=fmt,
                    bitrate=bitrate if bitrate in devices.BITRATES else 128000, schedule=schedule)
     return RedirectResponse(f"{BASE}/device/{dev}?msg=saved", 303)
+
+
+@guarded
+async def firmware_upload(request: Request):
+    """hbox.bin для обновления по воздуху (или отмена назначенного)."""
+    dev = request.path_params["dev"]
+    if dev not in devices.load():
+        return Response("Нет такого устройства", 404)
+    form = await request.form()
+    back = f'<p><a href="{BASE}/device/{esc(dev)}">назад</a></p>'
+    if form.get("cancel"):
+        devices.update(dev, ota=None)
+        return RedirectResponse(f"{BASE}/device/{dev}", 303)
+    up = form.get("firmware")
+    blob = await up.read() if hasattr(up, "read") else b""
+    core = _core()
+    info = core.app_info(blob)
+    if not info or info["project"] != "hbox":
+        return page("Ошибка", f"<p>Это не прошивка Hbox. Нужен файл hbox.bin из архива прошивки.</p>{back}")
+    if len(blob) > core.FW_MAX:
+        return page("Ошибка", f"<p>Прошивка больше слота ({core.FW_MAX // 1024} КБ).</p>{back}")
+    if not core.FW_VERSION.match(info["version"]):
+        return page("Ошибка", f"<p>Непонятная версия прошивки «{esc(info['version'])}».</p>{back}")
+    crc = zlib.crc32(blob)
+    name = f"{crc:08x}.bin"
+    core.fw_dir().mkdir(parents=True, exist_ok=True)
+    (core.fw_dir() / name).write_bytes(blob)
+    devices.update(dev, ota={"name": name, "size": len(blob), "crc": crc, "version": info["version"]})
+    return RedirectResponse(f"{BASE}/device/{dev}?msg=ota", 303)
 
 
 @guarded
@@ -334,6 +392,7 @@ routes = [
     Route("/add", add, methods=["POST"]),
     Route("/device/{dev}", device),
     Route("/device/{dev}", device_save, methods=["POST"]),
+    Route("/device/{dev}/firmware", firmware_upload, methods=["POST"]),
     Route("/token/{dev}.bat", token_bat),
     Route("/file/{dev}/{day}/{name}", file),
 ]

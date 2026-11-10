@@ -30,7 +30,7 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 
 from . import admin, devices
@@ -57,6 +57,25 @@ NAME = re.compile(r"^[A-Za-z0-9-]{1,32}_(\d{8})_(\d{6})\.(mp3|m4a)$")
 STATUS_FIELDS = ("rec", "files", "pending", "dropped", "overflows", "rec_errors", "cpu", "csq",
                  "up_errors", "sent", "kbps", "uptime", "reset", "sd_free", "sd_total",
                  "pending_mb")
+
+
+# прошивки для обновления по воздуху: DATA/firmware/<crc32>.bin
+FW_NAME = re.compile(r"^[0-9a-f]{8}\.bin$")
+FW_VERSION = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+FW_MAX = 0x1E0000  # слот прошивки (firmware/partitions.csv)
+FW_PIECE_MAX = 65536
+
+
+def fw_dir() -> Path:
+    return DATA / "firmware"
+
+
+def app_info(blob: bytes) -> dict | None:
+    """Версия и проект из образа ESP-IDF (esp_app_desc_t после заголовков образа и сегмента); None — не он."""
+    if len(blob) < 256 or blob[0] != 0xE9 or int.from_bytes(blob[32:36], "little") != 0xABCD5432:
+        return None
+    text = lambda a, b: blob[a:b].split(b"\0")[0].decode("ascii", "replace")  # noqa: E731
+    return {"version": text(48, 80), "project": text(80, 112)}
 
 
 def device_of(request: Request) -> str | None:
@@ -235,13 +254,43 @@ async def config(request: Request):
             status[k] = int(request.query_params[k])
         except (KeyError, ValueError):
             pass
+    for k in ("fw", "fw_bad"):  # версия прошивки и та, что не запустилась (откат)
+        v = request.query_params.get(k, "")
+        if FW_VERSION.match(v):
+            status[k] = v
     if status:
         devices.report(dev, status)
     d = devices.load()[dev]
     record, recheck = devices.recording_now(d)
-    return JSONResponse({"record": record, "format": d["format"], "bitrate": d["bitrate"],
-                         "recheck": recheck, "channel": dev,
-                         "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    answer = {"record": record, "format": d["format"], "bitrate": d["bitrate"],
+              "recheck": recheck, "channel": dev,
+              "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    ota = d.get("ota")
+    if ota and ota["version"] not in (status.get("fw"), status.get("fw_bad")):
+        answer.update(ota_name=ota["name"], ota_size=ota["size"], ota_crc=f"{ota['crc']:08x}",
+                      ota_version=ota["version"])
+    return JSONResponse(answer)
+
+
+async def firmware_get(request: Request):
+    """Кусок прошивки: ?offset=&len= (устройство качает по 16 КБ)."""
+    if not device_of(request):
+        return error(401, "unknown device")
+    name = request.path_params["name"]
+    path = fw_dir() / name
+    if not FW_NAME.match(name) or not path.is_file():
+        return error(404, "no such firmware")
+    try:
+        offset = int(request.query_params["offset"])
+        length = int(request.query_params["len"])
+    except (KeyError, ValueError):
+        return error(400, "need offset, len")
+    if offset < 0 or not 0 < length <= FW_PIECE_MAX:
+        return error(400, "bad range")
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read(length)
+    return Response(data, media_type="application/octet-stream")
 
 
 async def speedtest(request: Request):
@@ -304,6 +353,7 @@ app = Starlette(
         Route("/hbox/v1/files/{name}", file_status, methods=["GET"]),
         Route("/hbox/v1/files/{name}", file_put, methods=["PUT"]),
         Route("/hbox/v1/config", config, methods=["GET"]),
+        Route("/hbox/v1/firmware/{name}", firmware_get, methods=["GET"]),
         Route("/hbox/speedtest", speedtest, methods=["POST"]),
         Mount("/hbox/admin", routes=admin.routes),
         # https://hbox.fabtech.uz/ — сразу на сайт
