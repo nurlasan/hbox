@@ -210,7 +210,7 @@ static esp_err_t modem_setup(void)
 
 	set_state("ppp");
 	/* как ML307R входит в PPP — пробуем варианты, удачный запоминаем */
-	static const char *const dials[] = {"AT+CGDATA=\"PPP\",1", "ATD*99#", "ATD*99***1#", "ATD*98*1#"};
+	static const char *const dials[] = {"ATD*99#", "ATD*99***1#", "ATD*98*1#", "AT+CGDATA=\"PPP\",1"};
 	static int dial_ok = -1;
 	static bool told;
 
