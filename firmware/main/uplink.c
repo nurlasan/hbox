@@ -125,7 +125,8 @@ static esp_err_t sock_connect(void)
 	}
 	sock_close();
 	modem_sock_reset();
-	snprintf(cmd, sizeof(cmd), "AT+MIPOPEN=%d,\"TCP\",\"%s\",%d,60,0", SOCK, SERVER, PORT);
+	/* режим буфера (,2): принятое ждёт в модеме, забираем AT+MIPRD — см. modem.c */
+	snprintf(cmd, sizeof(cmd), "AT+MIPOPEN=%d,\"TCP\",\"%s\",%d,60,2", SOCK, SERVER, PORT);
 	if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+MIPOPEN:", line, 70000) != ESP_OK ||
 	    !strstr(line, ",0")) {
 		printf("HBOX UP connect failed %s\n", line);
