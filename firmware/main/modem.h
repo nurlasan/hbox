@@ -32,7 +32,17 @@ esp_err_t modem_at_data(const char *cmd, const void *data, size_t len, int timeo
 /* Ждёт строку с префиксом (URC), остальные пропускает. */
 esp_err_t modem_wait(const char *prefix, char *out, int timeout_ms);
 
-/* --- TCP/TLS-сокет ML307R (AT+MIPOPEN — у вызывающего) --- */
+/* --- PPP: модем — «труба», TCP/TLS на ESP (lwIP) --- */
+
+/* ATD*99# — CONNECT, дальше по UART идут кадры PPP. В out — ответ модема при ошибке. */
+esp_err_t modem_dial(char *out);
+/* Сырые байты PPP в обе стороны (пока модем в режиме данных). */
+void modem_raw_write(const void *data, size_t len);
+int modem_raw_read(void *buf, size_t len, int timeout_ms);
+/* Из режима данных в команды (+++), повесить трубку. */
+void modem_hangup(void);
+
+/* --- TCP/TLS-сокет ML307R (AT+MIPOPEN — у вызывающего); с PPP не используется --- */
 
 /* больше AT+MIPSEND за раз не берёт */
 #define MODEM_SEND_MAX 8192

@@ -3,4 +3,5 @@ idf_component_register(SRCS main.c mic.c enc.c m4a.c store_sd.c recorder.c clock
                        EMBED_TXTFILES hbox_ca.pem
                        PRIV_REQUIRES esp_driver_i2s esp_driver_usb_serial_jtag esp_driver_uart esp_timer esp_rom
                                      fatfs sdmmc esp_driver_sdspi esp_ringbuf
-                                     nvs_flash shine app_update esp_app_format)
+                                     nvs_flash shine app_update esp_app_format
+                                     esp_netif esp_event esp_http_client esp-tls lwip)
