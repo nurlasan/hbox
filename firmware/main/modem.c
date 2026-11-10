@@ -245,14 +245,32 @@ static void escape_data(void)
 	}
 }
 
-esp_err_t modem_dial(char *out)
+void modem_at_log(const char *cmd, int timeout_ms)
+{
+	int64_t until = deadline(timeout_ms);
+	char line[MODEM_LINE_MAX];
+
+	tx_str(cmd);
+	tx_str("\r\n");
+	while (read_line(line, until) == ESP_OK) {
+		if (line[0]) {
+			printf("HBOX MODEM %s -> %s\n", cmd, line);
+		}
+		if (strcmp(line, "OK") == 0 || is_error(line)) {
+			return;
+		}
+	}
+}
+
+esp_err_t modem_dial(const char *cmd, char *out)
 {
 	int64_t until = deadline(30000);
 	char line[MODEM_LINE_MAX];
 
 	out[0] = '\0';
 	uart_flush_input(UART);
-	tx_str("ATD*99#\r\n");
+	tx_str(cmd);
+	tx_str("\r\n");
 	while (read_line(line, until) == ESP_OK) {
 		if (starts(line, "CONNECT")) {
 			return ESP_OK;

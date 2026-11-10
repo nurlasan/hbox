@@ -209,9 +209,31 @@ static esp_err_t modem_setup(void)
 	}
 
 	set_state("ppp");
-	err = modem_dial(line);
+	/* как ML307R входит в PPP — пробуем варианты, удачный запоминаем */
+	static const char *const dials[] = {"ATD*99#", "ATD*99***1#", "ATD*98*1#", "AT+CGDATA=\"PPP\",1"};
+	static int dial_ok = -1;
+	static bool told;
+
+	if (!told) {
+		told = true;
+		modem_at("AT+CMEE=2", NULL, NULL, 1000);
+		modem_at_log("AT+CGDCONT?", 2000);
+		modem_at_log("AT+CGACT?", 2000);
+		modem_at_log("AT+CGATT?", 2000);
+	}
+	err = ESP_FAIL;
+	for (int k = 0; k < 4 && err; k++) {
+		int i = dial_ok >= 0 ? (dial_ok + k) % 4 : k;
+
+		err = modem_dial(dials[i], line);
+		printf("HBOX UP dial %s: %s\n", dials[i], err ? line : "CONNECT");
+		if (!err) {
+			dial_ok = i;
+		} else {
+			vTaskDelay(pdMS_TO_TICKS(1000));
+		}
+	}
 	if (err) {
-		printf("HBOX UP dial failed: %s\n", line);
 		return err;
 	}
 	xEventGroupClearBits(net_ev, NET_UP | NET_DOWN);
