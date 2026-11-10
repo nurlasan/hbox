@@ -82,7 +82,8 @@ static void task(void *arg)
 					f = NULL;
 				}
 				stats.errors++;
-				vTaskDelay(pdMS_TO_TICKS(1000));
+				/* нет карты — store ищет её раз в 30 с */
+				vTaskDelay(pdMS_TO_TICKS(10000));
 				continue;
 			}
 			printf("HBOX REC new file %s %d\n", ext, bitrate);

@@ -3,10 +3,11 @@
 Протокол — docs/protocol.md. Коротко:
     GET  /hbox/v1/files/<имя>                    → {"size": принято байт, "done": файл целый,
                                                      "check": "смещение:crc,..." — CRC начала файла}
-    PUT  /hbox/v1/files/<имя>?offset=N&total=T&crc=<crc32 hex>
-         тело — байты файла с позиции N; при обрыве принятое сохраняется, устройство
-         спрашивает GET и продолжает с size (или раньше — тогда хвост отбрасывается).
-         Когда принято T байт и CRC сошёлся — файл готов.
+    PUT  /hbox/v1/files/<имя>?offset=N&total=T&crc=<crc32 hex>[&upto=<crc32 hex>]
+         тело — байты файла с позиции N (весь остаток или кусок); при обрыве принятое
+         сохраняется, устройство спрашивает GET и продолжает с size (или раньше — тогда хвост
+         отбрасывается). upto — CRC начала файла по конец этого куска: не сошёлся — кусок
+         выбрасывается (422, size = N). Когда принято T байт и CRC сошёлся — файл готов.
     GET  /hbox/v1/config?<состояние>             → настройки записи устройства
     POST /hbox/speedtest                         → замер скорости (тело выбрасывается)
     /hbox/admin/...                              → сайт (admin.py)
@@ -146,6 +147,8 @@ async def file_put(request: Request):
         offset = int(request.query_params["offset"])
         total = int(request.query_params["total"])
         want_crc = int(request.query_params["crc"], 16)
+        upto = int(request.query_params["upto"], 16) if "upto" in request.query_params else None
+        body_len = int(request.headers.get("content-length", -1))
     except (KeyError, ValueError):
         return error(400, "need offset, total, crc")
     if free_gb() < MIN_FREE_GB:
@@ -172,6 +175,7 @@ async def file_put(request: Request):
                     crc = zlib.crc32(chunk, crc)
                     left -= len(chunk)
             size = offset
+        start_crc = crc
         try:
             with open(part, "r+b" if part.exists() else "wb") as f:
                 f.truncate(size)
@@ -187,6 +191,14 @@ async def file_put(request: Request):
                     log.info("%s %s: disconnected at %d of %d", dev, name, size, total)
                 f.flush()
                 os.fsync(f.fileno())
+            if upto is not None and size == offset + body_len and crc != upto:
+                # кусок пришёл целиком, но испорченным — выбрасываем только его
+                log.warning("%s %s: part %d+%d crc %08x != %08x, dropped", dev, name, offset, body_len,
+                            crc, upto)
+                size, crc = offset, start_crc
+                with open(part, "r+b") as f:
+                    f.truncate(size)
+                return error(422, "part crc mismatch", size=size)
         finally:
             save_state(state, size, crc, total)
 

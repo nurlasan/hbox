@@ -74,7 +74,7 @@ void app_main(void)
 	       settings.format, settings.bitrate, settings.record);
 
 	if (!store_init()) {
-		printf("HBOX ERROR store: no PSRAM\n");
+		printf("HBOX ERROR store: no SD card\n");
 	}
 	err = mic_start();
 	if (err) {

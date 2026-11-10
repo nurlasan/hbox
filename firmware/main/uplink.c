@@ -34,8 +34,6 @@ static int64_t sock_used_us;
 /* тело запроса кусками из хранилища; ответ сервера */
 static uint8_t chunk[MODEM_SEND_MAX];
 static char resp[1024];
-/* сколько байт тела последнего запроса модем точно принял (OK на AT+MIPSEND) */
-static uint32_t body_confirmed;
 
 void uplink_get_stats(struct uplink_stats *st)
 {
@@ -147,7 +145,6 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 	char *body;
 
 	resp[0] = '\0';
-	body_confirmed = 0;
 	if (sock_connect() != ESP_OK) {
 		return -1;
 	}
@@ -167,7 +164,6 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 			goto broken;
 		}
 		off += len;
-		body_confirmed = off;
 	}
 
 	/* заголовки ответа, затем тело по Content-Length; сервер отвечает сразу — 15 с без ответа значит,
@@ -327,27 +323,61 @@ static bool file_name(const struct store_info *info, char *out, size_t cap)
 	return true;
 }
 
-/*
- * После обрыва посреди AT+MIPSEND модем мог отправить кусок с потерянными байтами — у сервера
- * хвост с дырой. Продолжаем не с размера на сервере, а с последнего подтверждённого модемом места.
- */
-static struct store_file *resume_file;
-static uint32_t resume_at;
 
-/* Отправляет файл до конца или до обрыва. true — сервер подтвердил файл целиком. */
+/* Тело одного PUT: ~30 с отправки. Кусок, испорченный модемом, сервер выбрасывает целиком (upto). */
+#define PART_BYTES (1024 * 1024)
+
+static int64_t config_at;
+
+/* Настройки, если пора, — и между кусками часового файла. 1 — спросили, 0 — не пора, -1 — ошибка. */
+static int config_if_due(void)
+{
+	if (esp_timer_get_time() < config_at) {
+		return 0;
+	}
+	set_state("idle");
+	int recheck = fetch_config();
+
+	if (!recheck) {
+		return -1;
+	}
+	config_at = esp_timer_get_time() + recheck * 1000000LL;
+	return 1;
+}
+
+/* *crc дополняется CRC-32 байт файла [off, off + len). */
+static bool crc_range(struct store_file *f, uint32_t *crc, uint32_t off, uint32_t len)
+{
+	while (len) {
+		size_t n = store_read(f, off, chunk, len < sizeof(chunk) ? len : sizeof(chunk));
+
+		if (!n) {
+			return false;
+		}
+		*crc = esp_rom_crc32_le(*crc, chunk, n);
+		off += n;
+		len -= n;
+	}
+	return true;
+}
+
 /*
  * Сколько из принятого сервером совпадает с файлом: сервер присылает CRC начала файла в нескольких
- * точках ("check": "смещение:crc,..."), берём последнюю совпавшую. Модем изредка теряет байты —
- * хвост на сервере тогда испорчен, и докачка поверх него кончилась бы 422 и отправкой заново.
+ * точках ("check": "смещение:crc,..."), берём последнюю совпавшую (в *crc_at — CRC до неё).
+ * Модем изредка теряет байты — хвост на сервере тогда испорчен.
  */
-static long verified_size(struct store_file *f, long size)
+static long verified_size(struct store_file *f, long size, uint32_t *crc_at)
 {
 	char check[320], *p = check, *end;
 	uint32_t crc = 0, pos = 0;
 	long good = 0;
 
-	if (size <= 0 || !json_str("check", check, sizeof(check))) {
-		return size;
+	*crc_at = 0;
+	if (size <= 0) {
+		return 0;
+	}
+	if (!json_str("check", check, sizeof(check))) {
+		return crc_range(f, crc_at, 0, size) ? size : 0;
 	}
 	while (*p) {
 		unsigned long off = strtoul(p, &end, 10);
@@ -357,28 +387,27 @@ static long verified_size(struct store_file *f, long size)
 		}
 		uint32_t want = strtoul(end + 1, &end, 16);
 
-		while (pos < off) {
-			size_t n = store_read(f, pos, chunk, off - pos < sizeof(chunk) ? off - pos : sizeof(chunk));
-
-			if (!n) {
-				return good;
-			}
-			crc = esp_rom_crc32_le(crc, chunk, n);
-			pos += n;
+		if (!crc_range(f, &crc, pos, off - pos)) {
+			break;
 		}
+		pos = off;
 		if (crc == want) {
 			good = off;
+			*crc_at = crc;
 		}
 		p = *end == ',' ? end + 1 : end;
 	}
 	return good;
 }
 
+/* Отправляет файл кусками по PART_BYTES до конца или до первой ошибки. true — сервер принял файл целиком. */
 static bool send_file(struct store_file *f, const struct store_info *info)
 {
-	char name[96], path[224];
+	char name[96], path[256];
+	int64_t t0 = esp_timer_get_time();
+	uint32_t crc;
+	long size, start;
 	int code;
-	long size;
 
 	file_name(info, name, sizeof(name));
 	snprintf(path, sizeof(path), "/hbox/v1/files/%s", name);
@@ -387,57 +416,61 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 		printf("HBOX UP status %s failed (%d)\n", name, code);
 		return false;
 	}
-	for (int attempt = 0; attempt < 3; attempt++) {
-		if (json_bool("done", 0) == 1) {
-			return true;
-		}
-		size = json_long("size", 0);
-		if (size < 0 || size > (long)info->size) {
-			size = 0;
-		}
-		long good = verified_size(f, size);
+	if (json_bool("done", 0) == 1) {
+		return true;
+	}
+	size = json_long("size", 0);
+	if (size < 0 || size > (long)info->size) {
+		size = 0;
+	}
+	start = verified_size(f, size, &crc);
+	if (start != size) {
+		printf("HBOX UP %s: server has %ld, matches up to %ld\n", name, size, start);
+	}
+	for (size = start;;) {
+		uint32_t len = info->size - size < PART_BYTES ? info->size - size : PART_BYTES;
+		uint32_t upto = crc;
 
-		if (good != size) {
-			printf("HBOX UP %s: server has %ld, matches up to %ld\n", name, size, good);
-			size = good;
-		}
-		if (resume_file == f && size > (long)resume_at) {
-			size = resume_at;
-		}
-		int64_t t0 = esp_timer_get_time();
-
-		set_state("send");
-		snprintf(path, sizeof(path), "/hbox/v1/files/%s?offset=%ld&total=%lu&crc=%08lx", name, size,
-			 (unsigned long)info->size, (unsigned long)info->crc);
-		code = http("PUT", path, f, size, info->size - size);
-		double sec = (esp_timer_get_time() - t0) / 1e6;
-
-		resume_file = code < 0 ? f : NULL;
-		resume_at = size + body_confirmed;
-
-		if (code == 200 && json_bool("done", 0) == 1) {
-			taskENTER_CRITICAL(&mux);
-			stats.sent_files++;
-			stats.sent_kb += (info->size - size) / 1024;
-			stats.kbps10 = sec > 0 ? (info->size - size) / 102.4 / sec : 0;
-			taskEXIT_CRITICAL(&mux);
-			printf("HBOX UP sent %s %lu B (from %ld) in %.1f s = %.1f KB/s\n", name,
-			       (unsigned long)info->size, size, sec, (info->size - size) / 1024.0 / sec);
-			return true;
-		}
-		/* 409 — сервер сказал, сколько у него есть; 422 — CRC не сошёлся, заново с 0 */
-		if (code != 409 && code != 422) {
-			printf("HBOX UP send %s failed (%d) %s\n", name, code, resp);
+		if (!crc_range(f, &upto, size, len)) {
+			printf("HBOX UP %s: read failed at %ld\n", name, size);
 			return false;
 		}
-		printf("HBOX UP %s: %d, retry %s\n", name, code, resp);
+		set_state("send");
+		snprintf(path, sizeof(path), "/hbox/v1/files/%s?offset=%ld&total=%lu&crc=%08lx&upto=%08lx",
+			 name, size, (unsigned long)info->size, (unsigned long)info->crc, (unsigned long)upto);
+		code = http("PUT", path, f, size, len);
+		/* 422 — кусок испорчен по дороге и выброшен сервером; обрыв, 409 — снова со статуса */
+		if (code != 200) {
+			printf("HBOX UP send %s failed (%d) at %ld %s\n", name, code, size, resp);
+			return false;
+		}
+		if (json_bool("done", 0) == 1) {
+			break;
+		}
+		if (json_long("size", -1) != size + (long)len) {
+			printf("HBOX UP %s: server size mismatch %s\n", name, resp);
+			return false;
+		}
+		size += len;
+		crc = upto;
+		if (config_if_due() < 0) {
+			return false;
+		}
 	}
-	return false;
+	double sec = (esp_timer_get_time() - t0) / 1e6;
+
+	taskENTER_CRITICAL(&mux);
+	stats.sent_files++;
+	stats.sent_kb += (info->size - start) / 1024;
+	stats.kbps10 = sec > 0 ? (info->size - start) / 102.4 / sec : 0;
+	taskEXIT_CRITICAL(&mux);
+	printf("HBOX UP sent %s %lu B (from %ld) in %.1f s = %.1f KB/s\n", name, (unsigned long)info->size,
+	       start, sec, (info->size - start) / 1024.0 / sec);
+	return true;
 }
 
 static void task(void *arg)
 {
-	int64_t config_at = 0;
 	int failures = 0;
 	bool ready = false;
 
@@ -458,19 +491,16 @@ static void task(void *arg)
 			}
 			config_at = 0;
 		}
-		if (esp_timer_get_time() >= config_at) {
-			set_state("idle");
-			int recheck = fetch_config();
+		int got = config_if_due();
 
-			if (recheck) {
-				config_at = esp_timer_get_time() + recheck * 1000000LL;
-				failures = 0;
-			} else {
-				failures++;
-				stats.errors++;
-				vTaskDelay(pdMS_TO_TICKS(5000));
-				continue;
-			}
+		if (got < 0) {
+			failures++;
+			stats.errors++;
+			vTaskDelay(pdMS_TO_TICKS(5000));
+			continue;
+		}
+		if (got > 0) {
+			failures = 0;
 		}
 
 		struct store_info info;

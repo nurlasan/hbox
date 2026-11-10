@@ -1,8 +1,7 @@
 /*
  * Хранилище записанных файлов до отправки.
  *
- * Сейчас — в PSRAM (store_ram.c): несколько коротких файлов, после перезагрузки всё теряется.
- * С microSD (hbox-46t) — те же функции поверх FAT, часовые файлы, 7 дней.
+ * На microSD (store_sd.c): часовые файлы лежат до подтверждения сервером, переживают перезагрузку.
  *
  * Файл пишет recorder (create → write/pwrite → close), отправляет uplink (next → read → sent).
  */
@@ -12,8 +11,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Длина файла: часовые на карте, пока карты нет — короткие, чтобы помещались в PSRAM. */
-#define STORE_FILE_SECONDS 30
+/* Длина файла; файлы начинаются на границе часа UTC. */
+#define STORE_FILE_SECONDS 3600
 
 struct store_file;
 
@@ -27,6 +26,7 @@ struct store_info {
 	uint32_t crc;
 };
 
+/* false — нет карты (запись не идёт; карту ищем снова при каждом новом файле) */
 bool store_init(void);
 /* Новый файл. Нет места — выбрасывается самый старый неотправленный (счётчик store_dropped). */
 struct store_file *store_create(int64_t start_us, int64_t start_utc, const char *ext);

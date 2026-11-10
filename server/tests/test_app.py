@@ -88,6 +88,27 @@ def test_checkpoints_cover_whole_file(tmp_path):
     assert all(int(crc, 16) == zlib.crc32(data[:int(off)]) for off, crc in check)
 
 
+def test_parts_with_upto(client, tmp_path):
+    data = os.urandom(300_000)
+    crc = zlib.crc32(data)
+
+    def part(a, b, body=None):
+        return client.put(f"/hbox/v1/files/{NAME}", params={
+            "offset": a, "total": len(data), "crc": f"{crc:08x}", "upto": f"{zlib.crc32(data[:b]):08x}"},
+            content=data[a:b] if body is None else body, headers=AUTH)
+
+    assert part(0, 100_000).json() == {"size": 100_000, "done": False}
+    # кусок испорчен по дороге — выброшен только он
+    bad = bytearray(data[100_000:200_000])
+    bad[5] ^= 1
+    r = part(100_000, 200_000, bytes(bad))
+    assert r.status_code == 422 and r.json()["size"] == 100_000
+    assert client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json()["size"] == 100_000
+    assert part(100_000, 200_000).json()["size"] == 200_000
+    assert part(200_000, 300_000).json() == {"size": 300_000, "done": True}
+    assert (tmp_path / "cafe-1" / "2026-11-10" / NAME).read_bytes() == data
+
+
 def test_crc_mismatch_starts_over(client):
     data = os.urandom(10_000)
     r = put(client, data, 0, len(data), zlib.crc32(data) ^ 1)
