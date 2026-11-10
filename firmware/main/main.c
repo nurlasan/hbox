@@ -73,6 +73,7 @@ void app_main(void)
 	       settings.channel[0] ? settings.channel : "?", settings.token[0] ? "set" : "none",
 	       settings.format, settings.bitrate, settings.record);
 
+	store_set_channel(settings.channel);
 	if (!store_init()) {
 		printf("HBOX ERROR store: no SD card\n");
 	}

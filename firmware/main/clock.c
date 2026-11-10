@@ -19,6 +19,11 @@ static int64_t days_from_civil(int y, int m, int d)
 	return era * 146097 + doe - 719468;
 }
 
+int64_t clock_utc(int y, int mo, int d, int h, int mi, int s)
+{
+	return days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s;
+}
+
 static bool set(int y, int mo, int d, int h, int mi, int s, int offset_s)
 {
 	if (y < 2025 || y > 2037 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 60) {

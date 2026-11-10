@@ -298,6 +298,7 @@ static int fetch_config(void)
 	if (memcmp(&s, cfg, sizeof(s)) != 0) {
 		*cfg = s;
 		settings_save(cfg);
+		store_set_channel(cfg->channel);
 		printf("HBOX UP config channel=%s format=%s bitrate=%d record=%d\n", s.channel, s.format,
 		       s.bitrate, s.record);
 	}

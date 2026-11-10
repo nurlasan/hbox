@@ -6,17 +6,20 @@
  * Запись карты бывает медленной (до сотен мс на кадр FAT), а у микрофона буфер ~0,5 с — поэтому
  * recorder кладёт данные в кольцо в PSRAM, а на карту их пишет отдельная задача.
  *
- * Имена на карте: <UTC начала>.<ext>; пока пишется — с .part; если время начала ещё неизвестно —
- * u<номер>.<ext>, переименовывается, как только время придёт. После перезагрузки .part от mp3
+ * Имена на карте — как на сервере: <канал>_YYYYMMDD_HHMMSS.<ext> (начало по UTC); пока пишется — с .part;
+ * если время начала ещё неизвестно — u<номер>.<ext>, переименовывается, как только время придёт.
+ * Старые имена <секунды Unix>.<ext> при включении переименовываются в новые. После перезагрузки .part от mp3
  * отправляется как есть (кадры MP3 независимы), m4a без moov — пока выбрасывается (hbox-5nq).
  */
 #include "store.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <driver/sdspi_host.h>
 #include <driver/spi_common.h>
@@ -42,6 +45,7 @@
 #define SENT_DIR SD_DIR "/sent"
 #define SENT_KEEP_S (7 * 86400)
 #define FILES_MAX 256
+#define NAME_MAX_LEN 128
 /* 1 МБ — минута звука и весь moov часового m4a: запись не ждёт карту даже при её паузах */
 #define RING_BYTES (1024 * 1024)
 #define STAGE_BYTES 4096
@@ -55,6 +59,7 @@ struct store_file {
 	enum state state;
 	struct store_info info;
 	char ext[4];
+	char chan[33];
 	bool crc_known, failed;
 	uint32_t seq;
 };
@@ -71,6 +76,7 @@ static SemaphoreHandle_t lock;
 static RingbufHandle_t ring;
 static sdmmc_card_t *card;
 static uint32_t seq, dropped;
+static char channel[33] = "hbox";
 /* последняя ошибка карты: после неё новый файл — не раньше чем через FAIL_PAUSE_US */
 static volatile int64_t failed_us;
 #define FAIL_PAUSE_US 10000000LL
@@ -87,12 +93,75 @@ static FILE *rd;
 static struct store_file *rd_f;
 static uint8_t *crc_buf;
 
+/* <канал>_YYYYMMDD_HHMMSS.<ext> — как на сервере */
+static void name_of(const struct store_file *f, char *out, size_t cap)
+{
+	time_t t = f->info.start_utc;
+	struct tm tm;
+
+	gmtime_r(&t, &tm);
+	snprintf(out, cap, "%s_%04d%02d%02d_%02d%02d%02d.%s", f->chan, tm.tm_year + 1900, tm.tm_mon + 1,
+		 tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, f->ext);
+}
+
 static void path_of(const struct store_file *f, bool part, char *out, size_t cap)
 {
 	if (f->info.start_utc) {
-		snprintf(out, cap, SD_DIR "/%lld.%s%s", f->info.start_utc, f->ext, part ? ".part" : "");
+		char name[NAME_MAX_LEN];
+
+		name_of(f, name, sizeof(name));
+		snprintf(out, cap, SD_DIR "/%s%s", name, part ? ".part" : "");
 	} else {
 		snprintf(out, cap, SD_DIR "/u%lu.%s%s", (unsigned long)f->seq, f->ext, part ? ".part" : "");
+	}
+}
+
+/*
+ * Время начала из имени: <канал>_YYYYMMDD_HHMMSS.… или старое <секунды Unix>.…
+ * В chan — канал (для старых имён — текущий), в *rest — всё после первой точки. 0 — не наше имя.
+ */
+static int64_t parse_name(const char *name, char *chan, size_t cap, const char **rest)
+{
+	/* точка перед расширением, а не в имени канала */
+	const char *dot = strstr(name, ".mp3");
+
+	if (!dot) {
+		dot = strstr(name, ".m4a");
+	}
+	size_t n = dot ? (size_t)(dot - name) : 0;
+	int y, mo, d, h, mi, s;
+	size_t i;
+
+	if (!n) {
+		return 0;
+	}
+	*rest = dot + 1;
+	for (i = 0; i < n && isdigit((unsigned char)name[i]); i++) {
+	}
+	if (i == n) {
+		snprintf(chan, cap, "%s", channel);
+		return strtoll(name, NULL, 10);
+	}
+	if (n < 17 || n - 16 >= cap || name[n - 16] != '_' || name[n - 7] != '_' ||
+	    sscanf(name + n - 15, "%4d%2d%2d_%2d%2d%2d", &y, &mo, &d, &h, &mi, &s) != 6) {
+		return 0;
+	}
+	memcpy(chan, name, n - 16);
+	chan[n - 16] = '\0';
+	return clock_utc(y, mo, d, h, mi, s);
+}
+
+void store_set_channel(const char *ch)
+{
+	if (!ch[0] || strlen(ch) >= sizeof(channel)) {
+		return;
+	}
+	if (lock) {
+		xSemaphoreTake(lock, portMAX_DELAY);
+	}
+	strcpy(channel, ch);
+	if (lock) {
+		xSemaphoreGive(lock);
 	}
 }
 
@@ -158,7 +227,7 @@ static struct store_file *oldest(enum state state)
 static bool drop_oldest(void)
 {
 	struct store_file *f = oldest(READY);
-	char path[48];
+	char path[NAME_MAX_LEN];
 
 	if (!f) {
 		return false;
@@ -182,9 +251,11 @@ static bool oldest_sent(long long *utc, char *out, size_t cap)
 		return false;
 	}
 	while ((e = readdir(d))) {
-		long long t;
+		char chan[33];
+		const char *rest;
+		long long t = parse_name(e->d_name, chan, sizeof(chan), &rest);
 
-		if (sscanf(e->d_name, "%lld.", &t) == 1 && t > 0 && (!found || t < *utc)) {
+		if (t > 0 && (!found || t < *utc)) {
 			*utc = t;
 			snprintf(out, cap, SENT_DIR "/%s", e->d_name);
 			found = true;
@@ -218,7 +289,7 @@ static void prune_sent(void)
 /* Время начала пришло позже, чем файл начался: переименовать u<номер> в <UTC>. */
 static void name_late(struct store_file *f)
 {
-	char from[48], to[48];
+	char from[NAME_MAX_LEN], to[NAME_MAX_LEN];
 	int64_t t = f->info.start_utc ? 0 : clock_at(f->info.start_us);
 
 	if (!t) {
@@ -235,7 +306,7 @@ static void name_late(struct store_file *f)
 static void writer(void *arg)
 {
 	FILE *out = NULL;
-	char path[48], final[48];
+	char path[NAME_MAX_LEN], final[NAME_MAX_LEN];
 	int64_t synced_us = 0;
 
 	for (;;) {
@@ -333,15 +404,17 @@ static void scan(void)
 		return;
 	}
 	while ((e = readdir(d)) && n < FILES_MAX) {
-		char path[300], ext[8] = "", part[8] = "";
-		long long utc = 0;
+		char path[300], ext[8] = "", part[8] = "", chan[33] = "";
+		const char *rest = "";
+		long long utc;
 		struct stat st;
 
 		if (strcmp(e->d_name, "sent") == 0) {
 			continue;
 		}
 		snprintf(path, sizeof(path), SD_DIR "/%s", e->d_name);
-		if (sscanf(e->d_name, "%lld.%3[a-z0-9].%5s", &utc, ext, part) < 2 || utc <= 0 ||
+		utc = parse_name(e->d_name, chan, sizeof(chan), &rest);
+		if (sscanf(rest, "%3[a-z0-9].%5s", ext, part) < 1 || utc <= 0 ||
 		    (strcmp(ext, "mp3") && strcmp(ext, "m4a")) || (part[0] && strcmp(part, "part")) ||
 		    (part[0] && strcmp(ext, "m4a") == 0) || stat(path, &st) || !st.st_size) {
 			/* u<номер> — время так и не узнали; m4a без moov; мусор */
@@ -353,13 +426,14 @@ static void scan(void)
 
 		*f = (struct store_file){.state = READY};
 		strcpy(f->ext, ext);
+		strcpy(f->chan, chan);
 		f->info = (struct store_info){.start_utc = utc, .ext = f->ext, .size = st.st_size};
-		if (part[0]) {
-			/* mp3 оборвался при выключении — отправляем, что успело записаться */
-			char final[48];
+		/* .part — mp3 оборвался при выключении, отправляем что успело записаться; старое имя — в новое */
+		char final[NAME_MAX_LEN];
 
-			path_of(f, false, final, sizeof(final));
-			rename(path, final);
+		path_of(f, false, final, sizeof(final));
+		if (strcmp(path, final) && rename(path, final)) {
+			printf("HBOX SD ERROR rename %s\n", e->d_name);
 		}
 	}
 	closedir(d);
@@ -417,6 +491,7 @@ struct store_file *store_create(int64_t start_us, int64_t start_utc, const char 
 	if (f) {
 		*f = (struct store_file){.state = RECORDING, .seq = ++seq};
 		strncpy(f->ext, ext, sizeof(f->ext) - 1);
+		strcpy(f->chan, channel);
 		f->info = (struct store_info){.start_us = start_us, .start_utc = start_utc, .ext = f->ext};
 	}
 	xSemaphoreGive(lock);
@@ -520,7 +595,7 @@ struct store_file *store_next(struct store_info *info)
 
 size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len)
 {
-	char path[48];
+	char path[NAME_MAX_LEN];
 
 	if (offset >= f->info.size) {
 		return 0;
@@ -545,7 +620,7 @@ size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len)
 
 void store_sent(struct store_file *f)
 {
-	char path[48], to[64];
+	char path[NAME_MAX_LEN], name[NAME_MAX_LEN], to[NAME_MAX_LEN + 16];
 
 	if (rd_f == f) {
 		fclose(rd);
@@ -554,7 +629,8 @@ void store_sent(struct store_file *f)
 	}
 	xSemaphoreTake(lock, portMAX_DELAY);
 	path_of(f, false, path, sizeof(path));
-	snprintf(to, sizeof(to), SENT_DIR "/%lld.%s", f->info.start_utc, f->ext);
+	name_of(f, name, sizeof(name));
+	snprintf(to, sizeof(to), SENT_DIR "/%s", name);
 	if (rename(path, to)) {
 		printf("HBOX SD ERROR keep %s\n", path);
 		unlink(path);

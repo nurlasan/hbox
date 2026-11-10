@@ -27,6 +27,8 @@ struct store_info {
 	uint32_t crc;
 };
 
+/* Префикс имён файлов на карте (id канала); можно звать и до store_init. */
+void store_set_channel(const char *channel);
 /* false — нет карты (запись не идёт; карту ищем снова при каждом новом файле) */
 bool store_init(void);
 /* Новый файл. Нет места — выбрасывается самый старый неотправленный (счётчик store_dropped). */
