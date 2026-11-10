@@ -81,7 +81,7 @@ static sdmmc_card_t *card;
 static uint32_t seq, dropped;
 static char channel[33] = "hbox";
 /* диск FatFs карты ("0:") — атрибуты файлов VFS не умеет, ставим их через FatFs */
-static char drv[4];
+static char drv[8];
 /* последняя ошибка карты: после неё новый файл — не раньше чем через FAIL_PAUSE_US */
 static volatile int64_t failed_us;
 #define FAIL_PAUSE_US 10000000LL
@@ -248,7 +248,8 @@ static bool drop_oldest(void)
 /* /sd/hbox/x → 0:/hbox/x для FatFs */
 static void ff_path(const char *path, char *out, size_t cap)
 {
-	snprintf(out, cap, "%s%s", drv, path + strlen(MOUNT));
+	strlcpy(out, drv, cap);
+	strlcat(out, path + strlen(MOUNT), cap);
 }
 
 static bool is_sent(const char *path)
