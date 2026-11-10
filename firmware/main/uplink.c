@@ -1,9 +1,13 @@
 #include "uplink.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <esp_app_desc.h>
+#include <esp_heap_caps.h>
+#include <esp_ota_ops.h>
 #include <esp_rom_crc.h>
 #include <esp_system.h>
 #include <esp_timer.h>
@@ -135,12 +139,13 @@ static esp_err_t sock_connect(void)
 
 /*
  * Запрос с телом из файла хранилища (body_len байт с позиции body_off) или без тела.
- * Ответ — в resp (тело), возвращает код HTTP или -1 при обрыве.
+ * Ответ — в resp (тело), а если задан out — тело целиком в out (до out_cap байт, длина в *out_len).
+ * Возвращает код HTTP или -1 при обрыве.
  */
-static int http(const char *method, const char *path, struct store_file *f, uint32_t body_off,
-		uint32_t body_len)
+static int http_ex(const char *method, const char *path, struct store_file *f, uint32_t body_off,
+		   uint32_t body_len, uint8_t *out, size_t out_cap, size_t *out_len)
 {
-	char head[640];
+	char head[768];
 	size_t have = 0, need;
 	int code = -1, n;
 	char *body;
@@ -189,6 +194,29 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 	char *cl = strcasestr(resp, "\r\nContent-Length:");
 
 	body += 4;
+	if (out) {
+		/* тело в out: что пришло вместе с заголовками, и остальное прямо из сокета */
+		size_t clen = cl ? strtoul(cl + 17, NULL, 10) : 0, got = have - (body - resp);
+
+		if (clen > out_cap || got > clen) {
+			goto broken;
+		}
+		memcpy(out, body, got);
+		while (got < clen) {
+			n = modem_sock_recv(out + got, clen - got, 15000);
+			if (n <= 0) {
+				goto broken;
+			}
+			got += n;
+		}
+		*out_len = clen;
+		if (strcasestr(resp, "\r\nConnection: close")) {
+			sock_close();
+		}
+		resp[0] = '\0';
+		sock_used_us = esp_timer_get_time();
+		return code;
+	}
 	need = (body - resp) + (cl ? strtoul(cl + 17, NULL, 10) : 0);
 	while (have < need && have < sizeof(resp) - 1) {
 		n = modem_sock_recv(resp + have, sizeof(resp) - 1 - have, 15000);
@@ -209,6 +237,12 @@ broken:
 	sock_close();
 	resp[0] = '\0';
 	return -1;
+}
+
+static int http(const char *method, const char *path, struct store_file *f, uint32_t body_off,
+		uint32_t body_len)
+{
+	return http_ex(method, path, f, body_off, body_len, NULL, 0, NULL);
 }
 
 /* --- маленький разбор JSON ответов сервера --- */
@@ -256,12 +290,163 @@ static int json_bool(const char *key, int def)
 	return !p ? def : strncmp(p, "true", 4) == 0 ? 1 : strncmp(p, "false", 5) == 0 ? 0 : def;
 }
 
+/* --- обновление прошивки по воздуху (docs/protocol.md) --- */
+
+#define OTA_CHUNK 16384
+/* не получилось — следующая попытка не раньше чем через столько */
+#define OTA_RETRY_US (30 * 60 * 1000000LL)
+
+static struct {
+	char name[24], version[33];
+	uint32_t size, crc;
+	bool due;
+} ota;
+static int64_t ota_retry_at;
+/* версия, которая не запустилась и откатилась загрузчиком, — её не ставим снова */
+static char fw_bad[33];
+
+/* для строки запроса: только [A-Za-z0-9._-] */
+static void url_safe(char *s)
+{
+	for (; *s; s++) {
+		if (!isalnum((unsigned char)*s) && !strchr("._-", *s)) {
+			*s = '_';
+		}
+	}
+}
+
+static const char *fw_version(void)
+{
+	static char v[33];
+
+	if (!v[0]) {
+		strlcpy(v, esp_app_get_description()->version, sizeof(v));
+		url_safe(v);
+	}
+	return v;
+}
+
+static void ota_init(void)
+{
+	const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+	esp_app_desc_t d;
+
+	if (bad && esp_ota_get_partition_description(bad, &d) == ESP_OK) {
+		strlcpy(fw_bad, d.version, sizeof(fw_bad));
+		url_safe(fw_bad);
+	}
+	printf("HBOX UP firmware %s%s%s\n", fw_version(), fw_bad[0] ? ", rolled back from " : "", fw_bad);
+}
+
+/* Сервер ответил — новая прошивка работает, откат больше не нужен. */
+static void ota_mark_valid(void)
+{
+	static bool done;
+	esp_ota_img_states_t st;
+
+	if (done) {
+		return;
+	}
+	done = true;
+	if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &st) == ESP_OK &&
+	    st == ESP_OTA_IMG_PENDING_VERIFY) {
+		esp_ota_mark_app_valid_cancel_rollback();
+		printf("HBOX UP firmware %s confirmed\n", fw_version());
+	}
+}
+
+/* Из ответа на /config: есть ли прошивка новее нашей. */
+static void ota_check(void)
+{
+	char crc[12];
+
+	ota.due = false;
+	if (!json_str("ota_version", ota.version, sizeof(ota.version)) ||
+	    !json_str("ota_name", ota.name, sizeof(ota.name)) || !json_str("ota_crc", crc, sizeof(crc))) {
+		return;
+	}
+	url_safe(ota.version);
+	ota.size = json_long("ota_size", 0);
+	ota.crc = strtoul(crc, NULL, 16);
+	ota.due = ota.size && strcmp(ota.version, fw_version()) && strcmp(ota.version, fw_bad) &&
+		  esp_timer_get_time() >= ota_retry_at;
+}
+
+/* Скачать, проверить CRC и перезагрузиться в новую прошивку. Возврат — только при ошибке. */
+static void ota_run(void)
+{
+	const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+	esp_ota_handle_t h = 0;
+	uint8_t *buf = NULL;
+	uint32_t off = 0, crc = 0;
+	int tries = 0;
+	char path[96];
+
+	ota.due = false;
+	ota_retry_at = esp_timer_get_time() + OTA_RETRY_US;
+	if (!part || ota.size > part->size) {
+		printf("HBOX UP ota %s: no room (%lu B)\n", ota.version, (unsigned long)ota.size);
+		return;
+	}
+	buf = heap_caps_malloc(OTA_CHUNK, MALLOC_CAP_SPIRAM);
+	buf = buf ? buf : malloc(OTA_CHUNK);
+	if (!buf || esp_ota_begin(part, ota.size, &h) != ESP_OK) {
+		printf("HBOX UP ota %s: begin failed\n", ota.version);
+		free(buf);
+		return;
+	}
+	set_state("ota");
+	printf("HBOX UP ota %s -> %s, %lu B\n", fw_version(), ota.version, (unsigned long)ota.size);
+	while (off < ota.size) {
+		uint32_t len = ota.size - off < OTA_CHUNK ? ota.size - off : OTA_CHUNK;
+		size_t got = 0;
+		int code;
+
+		snprintf(path, sizeof(path), "/hbox/v1/firmware/%s?offset=%lu&len=%lu", ota.name,
+			 (unsigned long)off, (unsigned long)len);
+		code = http_ex("GET", path, NULL, 0, 0, buf, OTA_CHUNK, &got);
+		if (code != 200 || got != len) {
+			printf("HBOX UP ota get failed (%d) at %lu\n", code, (unsigned long)off);
+			if (++tries >= 5) {
+				goto fail;
+			}
+			vTaskDelay(pdMS_TO_TICKS(3000));
+			continue;
+		}
+		tries = 0;
+		if (esp_ota_write(h, buf, len) != ESP_OK) {
+			printf("HBOX UP ota write failed at %lu\n", (unsigned long)off);
+			goto fail;
+		}
+		crc = esp_rom_crc32_le(crc, buf, len);
+		off += len;
+	}
+	if (crc != ota.crc) {
+		printf("HBOX UP ota crc %08lx != %08lx\n", (unsigned long)crc, (unsigned long)ota.crc);
+		goto fail;
+	}
+	/* esp_ota_end ещё раз проверяет образ (контрольная сумма и SHA-256 внутри) */
+	if (esp_ota_end(h) != ESP_OK || esp_ota_set_boot_partition(part) != ESP_OK) {
+		printf("HBOX UP ota image rejected\n");
+		free(buf);
+		return;
+	}
+	free(buf);
+	printf("HBOX UP ota done, restarting into %s\n", ota.version);
+	vTaskDelay(pdMS_TO_TICKS(500));
+	esp_restart();
+
+fail:
+	esp_ota_abort(h);
+	free(buf);
+}
+
 /* --- настройки и файлы --- */
 
 /* Настройки; заодно состояние устройства для сайта. Возвращает, через сколько секунд спросить снова. */
 static int fetch_config(void)
 {
-	char channel[sizeof(cfg->channel)], format[8], t[32], path[320];
+	char channel[sizeof(cfg->channel)], format[8], t[32], path[400];
 	struct recorder_stats rec;
 	uint32_t sd_free, sd_total, pending_mb;
 	int code;
@@ -271,19 +456,21 @@ static int fetch_config(void)
 	snprintf(path, sizeof(path),
 		 "/hbox/v1/config?rec=%d&files=%lu&pending=%lu&dropped=%lu&overflows=%lu&rec_errors=%lu"
 		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld&reset=%d"
-		 "&sd_free=%lu&sd_total=%lu&pending_mb=%lu",
+		 "&sd_free=%lu&sd_total=%lu&pending_mb=%lu&fw=%s&fw_bad=%s",
 		 rec.recording, (unsigned long)rec.files, (unsigned long)store_pending(),
 		 (unsigned long)store_dropped(), (unsigned long)rec.overflows, (unsigned long)rec.errors,
 		 (unsigned long)rec.cpu10 / 10, stats.csq, (unsigned long)stats.errors,
 		 (unsigned long)stats.sent_files, (unsigned long)stats.kbps10 / 10,
 		 esp_timer_get_time() / 60000000, (int)esp_reset_reason(), (unsigned long)sd_free,
-		 (unsigned long)sd_total, (unsigned long)pending_mb);
+		 (unsigned long)sd_total, (unsigned long)pending_mb, fw_version(), fw_bad);
 	code = http("GET", path, NULL, 0, 0);
 
 	if (code != 200) {
 		printf("HBOX UP config failed (%d) %s\n", code, code == 401 ? "- wrong token" : "");
 		return 0;
 	}
+	ota_mark_valid();
+	ota_check();
 	/* время — с сервера при каждом запросе: AT+CCLK у ML307R отдаёт UTC с поясом, а по
 	 * документации должно быть местное, — такому не доверяем */
 	if (json_str("time", t, sizeof(t))) {
@@ -462,7 +649,8 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 		}
 		size += len;
 		crc = upto;
-		if (config_if_due() < 0) {
+		/* новая прошивка — прервать файл (докачается после), обновиться */
+		if (config_if_due() < 0 || ota.due) {
 			return false;
 		}
 	}
@@ -511,6 +699,10 @@ static void task(void *arg)
 		if (got > 0) {
 			failures = 0;
 		}
+		if (ota.due) {
+			ota_run(); /* вернулась — не вышло, следующая попытка через OTA_RETRY_US */
+			continue;
+		}
 
 		struct store_info info;
 		struct store_file *f = store_next(&info);
@@ -526,7 +718,7 @@ static void task(void *arg)
 		if (send_file(f, &info)) {
 			store_sent(f);
 			failures = 0;
-		} else {
+		} else if (!ota.due) {
 			set_state("wait");
 			failures++;
 			stats.errors++;
@@ -538,5 +730,6 @@ static void task(void *arg)
 void uplink_start(struct settings *s)
 {
 	cfg = s;
+	ota_init();
 	xTaskCreatePinnedToCore(task, "uplink", 8192, NULL, 5, NULL, 0);
 }

@@ -1,5 +1,6 @@
 # Прошивка ESP32-S3 SuperMini (ESP-IDF). В артефактах: bootloader.bin (0x0), partition-table.bin (0x8000),
-# hbox.bin (0x10000). Не одним файлом с 0x0: тот затёр бы NVS (0x9000) с токеном устройства.
+# hbox.bin (0x10000, слот ota_0), ota_data_initial.bin (0x3D0000 — загрузка с ota_0). Не одним файлом с 0x0:
+# тот затёр бы NVS (0x9000) с токеном устройства. hbox.bin же загружается на сайт для обновления по воздуху.
 name: firmware
 
 on:
@@ -18,11 +19,11 @@ jobs:
 
       - name: Build
         run: |
-          docker run --rm -v "$PWD:/w" -w /w/firmware espressif/idf:v5.5.1 sh -c '
+          docker run --rm -v "$PWD:/w" -w /w/firmware -e HBOX_VERSION="${GITHUB_SHA::7}" espressif/idf:v5.5.1 sh -c '
             idf.py set-target esp32s3 build &&
-            cp build/bootloader/bootloader.bin build/partition_table/partition-table.bin /w/ &&
+            cp build/bootloader/bootloader.bin build/partition_table/partition-table.bin build/ota_data_initial.bin /w/ &&
             cp build/hbox.bin /w/hbox.bin'
-          ls -l bootloader.bin partition-table.bin hbox.bin
+          ls -l bootloader.bin partition-table.bin ota_data_initial.bin hbox.bin
 
       - uses: actions/upload-artifact@v4
         with:
@@ -30,5 +31,6 @@ jobs:
           path: |
             bootloader.bin
             partition-table.bin
+            ota_data_initial.bin
             hbox.bin
           retention-days: 30

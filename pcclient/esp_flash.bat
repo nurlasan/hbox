@@ -1,6 +1,7 @@
 @echo off
 rem Прошивка ESP32-S3 SuperMini через USB-C. Порт - автоматически или: esp_flash.bat COM7
-rem Три части по своим адресам: токен устройства (NVS, 0x9000) не стирается.
+rem Части по своим адресам: токен устройства (NVS, 0x9000) не стирается. ota_data_initial.bin - загрузка
+rem с первого слота (0x10000), даже если устройство уже обновлялось по воздуху во второй.
 chcp 65001 >nul
 cd /d "%~dp0"
 if not exist partition-table.bin (
@@ -10,8 +11,10 @@ if not exist partition-table.bin (
 )
 call :venv || goto :fail
 set PORTARG=
+set OTADATA=
+if exist ota_data_initial.bin set OTADATA=0x3D0000 ota_data_initial.bin
 if not "%1"=="" set PORTARG=--port %1
-.venv\Scripts\python -m esptool --chip esp32s3 %PORTARG% write-flash --flash-size detect 0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 hbox.bin || goto :fail
+.venv\Scripts\python -m esptool --chip esp32s3 %PORTARG% write-flash --flash-size detect 0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 hbox.bin %OTADATA% || goto :fail
 echo Готово. Плата перезагрузится сама; если нет - нажмите RST.
 pause
 exit /b 0
