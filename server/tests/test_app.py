@@ -348,3 +348,11 @@ def test_ota_flow(site):
     assert "fw" not in devices.load()["cafe-1"]["status"]
     site.post(url, data={"cancel": "1"}, headers=SITE, auth=ADMIN)
     assert not devices.load()["cafe-1"].get("ota")
+
+
+def test_signal_icon():
+    from hbox_server import admin
+
+    assert admin.signal_bars(26) == 4 and admin.signal_bars(12) == 2 and admin.signal_bars(99) == 0
+    svg = admin.signal_icon(12)
+    assert svg.count("<rect") == 4 and svg.count("/>") == 4 and svg.count('class="on"') == 2

@@ -114,17 +114,52 @@ def firmware_box(dev: str, d: dict) -> str:
             f"связь, устройство само вернётся на прежнюю.</p></div>")
 
 STYLE = """
-body{font:15px/1.45 system-ui,sans-serif;margin:0;padding:16px;background:#f6f6f4;color:#222}
-h1{font-size:20px;margin:0 0 12px} h2{font-size:16px;margin:20px 0 8px}
-a{color:#1a5fb4} table{border-collapse:collapse;background:#fff;width:100%}
-td,th{border-bottom:1px solid #e3e3e0;padding:6px 8px;text-align:left;vertical-align:top}
-th{font-weight:600;background:#eeeeea} .ok{color:#1b7f3b} .bad{color:#b42318} .muted{color:#777}
-form.box,div.box{background:#fff;padding:12px;margin:8px 0;border:1px solid #e3e3e0}
-input,select,button{font:inherit;padding:4px 6px} audio{height:32px;vertical-align:middle}
-.wrap{overflow-x:auto} code{background:#eee;padding:1px 4px}
-@media (prefers-color-scheme: dark){body{background:#161616;color:#ddd}
-table,form.box,div.box{background:#202020;border-color:#333} th{background:#2a2a2a}
-td,th{border-color:#333} a{color:#8ab4f8} code{background:#333}}
+:root{--bg:#f4f5f7;--card:#fff;--line:#e4e6ea;--text:#1d1f23;--muted:#6b7280;--accent:#2563eb;
+--ok:#16a34a;--bad:#dc2626;--rec:#ef4444;--chip:#eef1f5;--off:#cfd4dc;--warn:#d97706}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--line:#2a2f38;--text:#e6e8eb;
+--muted:#9aa3af;--accent:#60a5fa;--ok:#22c55e;--bad:#f87171;--chip:#232831;--off:#3a404a}}
+*{box-sizing:border-box}
+body{font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;padding:20px 16px;
+background:var(--bg);color:var(--text)}
+.page{max-width:1200px;margin:0 auto}
+h1{font-size:22px;font-weight:650;margin:0 0 16px;letter-spacing:-.01em} h2{font-size:16px;margin:18px 0 8px}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+table{border-collapse:collapse;width:100%} td,th{border-bottom:1px solid var(--line);padding:6px 8px;
+text-align:left;vertical-align:top} th{font-weight:600}
+.ok{color:var(--ok)} .bad{color:var(--bad)} .muted{color:var(--muted)}
+form.box,div.box{background:var(--card);padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:14px}
+input,select,button{font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:8px;
+background:var(--card);color:var(--text)} button{background:var(--accent);color:#fff;border:0;cursor:pointer}
+audio{height:32px;vertical-align:middle;max-width:100%} code{background:var(--chip);padding:1px 4px;border-radius:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;
+box-shadow:0 1px 2px rgba(0,0,0,.04);display:flex;flex-direction:column;gap:12px;min-width:0}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.spread{justify-content:space-between}
+.name{font-size:18px;font-weight:650;color:var(--text)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--off);display:inline-block}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 20%,transparent)}
+.sig{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+.sig svg rect{fill:var(--off)} .sig svg rect.on{fill:var(--ok)} .sig b{color:var(--text);font-size:12px}
+.chip{display:inline-flex;align-items:center;gap:5px;background:var(--chip);border-radius:8px;
+padding:3px 9px;font-size:13px;font-weight:600}
+.chip svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2}
+.rec{display:inline-flex;align-items:center;gap:7px;font-weight:750;font-size:13px;letter-spacing:.08em;
+color:var(--rec);border:1.5px solid var(--rec);border-radius:8px;padding:2px 9px}
+.rec i{width:9px;height:9px;border-radius:50%;background:var(--rec);animation:pulse 1.2s ease-in-out infinite}
+.rec.idle{color:var(--muted);border-color:var(--off)} .rec.idle i{background:var(--off);animation:none}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1);box-shadow:0 0 0 0 rgba(239,68,68,.55)}
+50%{opacity:.35;transform:scale(.8);box-shadow:0 0 0 6px rgba(239,68,68,0)}}
+@media (prefers-reduced-motion:reduce){.rec i{animation:none}}
+.sd{display:flex;align-items:center;gap:10px}
+.sd svg{width:22px;height:26px;flex:none;fill:none;stroke:var(--muted);stroke-width:1.6}
+.bar{flex:1;height:8px;background:var(--chip);border-radius:6px;overflow:hidden;min-width:60px}
+.bar b{display:block;height:100%;background:var(--accent);border-radius:6px}
+.bar.full b{background:var(--bad)}
+.small{font-size:13px;color:var(--muted)}
+.problems{background:color-mix(in srgb,var(--bad) 10%,transparent);color:var(--bad);border-radius:10px;
+padding:8px 10px;font-size:13px}
+.last{font-size:13px;overflow-wrap:anywhere}
 """
 
 
@@ -171,7 +206,8 @@ def page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(
         f'<!doctype html><html lang="ru"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{esc(title)}</title><style>{STYLE}</style></head><body>{body}</body></html>",
+        f"<title>{esc(title)}</title><style>{STYLE}</style></head><body><div class=\"page\">{body}</div>"
+        f"</body></html>",
         headers={"Cache-Control": "no-store"})
 
 
@@ -205,40 +241,79 @@ def schedule_text(d: dict) -> str:
     return ", ".join(f"{devices.DAYS[i]} {esc(r) if r else 'нет'}" for i, r in enumerate(s))
 
 
+def signal_bars(csq) -> int:
+    """CSQ 0–31 (99 — нет данных) → 0–4 палочки"""
+    if not isinstance(csq, int) or csq >= 99 or csq < 2:
+        return 0
+    return 1 if csq < 10 else 2 if csq < 15 else 3 if csq < 20 else 4
+
+
+def signal_icon(csq) -> str:
+    n = signal_bars(csq)
+    on = ' class="on"'
+    bars = "".join(f'<rect x="{i * 5}" y="{12 - 3 * i}" width="3.5" height="{4 + 3 * i}" rx="1"'
+                   f'{on if i < n else ""}/>' for i in range(4))
+    return (f'<span class="sig" title="сигнал CSQ {esc(csq)}"><svg width="22" height="18" '
+            f'viewBox="0 0 19 16">{bars}</svg><b>4G</b></span>')
+
+
+ICON_FILE = ('<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>'
+             '<path d="M14 3v5h5"/></svg>')
+ICON_WAVE = '<svg viewBox="0 0 24 24"><path d="M3 12h3l3-7 4 14 3-9 2 2h3"/></svg>'
+ICON_SD = '<svg viewBox="0 0 22 26"><path d="M7 1h13v24H2V6z"/><path d="M8 5v4M11 5v4M14 5v4M17 5v4"/></svg>'
+
+
+def device_card(dev: str, d: dict, now: float) -> str:
+    seen = d.get("seen")
+    online = bool(seen and now - seen < ONLINE_S)
+    st = d.get("status", {})
+    rec_now, _ = devices.recording_now(d)
+    days = files_of(dev, 1)
+    today = days[0][1] if days else []
+    problems = [f"{STATUS_TITLES[k]}: {st[k]}" for k in ("dropped", "overflows", "rec_errors") if st.get(k)]
+    if st.get("reset") in BAD_RESETS:
+        problems.append(f"перезапуск: {RESETS[st['reset']]}")
+    lines, more = health(dev, d, now)
+    problems += more
+    sd_line = next((x for x in lines if x.startswith("SD ")), None)
+    lines = [x for x in lines if x is not sd_line]
+    recording = online and st.get("rec")
+    rec = ('<span class="rec"><i></i>REC</span>' if recording else
+           f'<span class="rec idle"><i></i>{"ПАУЗА" if online and not rec_now else "НЕ ПИШЕТ"}</span>')
+    if st.get("sd_total"):
+        used = 100 - st["sd_free"] * 100 // st["sd_total"]
+        sd = (f'<div class="sd">{ICON_SD}<div style="flex:1"><div class="bar{" full" if used > 90 else ""}">'
+              f'<b style="width:{max(used, 2)}%"></b></div><div class="small">{esc(sd_line)} · занято {used}%'
+              f"</div></div></div>")
+    else:
+        sd = f'<div class="sd">{ICON_SD}<span class="small">{"нет SD-карты" if "sd_total" in st else "SD: нет данных"}</span></div>'
+    sched = "по расписанию" if d.get("schedule") else "круглосуточно"
+    last = (f'<div class="last">{player(dev, days[0][0], today[0][0])}</div>' if today
+            else '<div class="small">файлов за сегодня нет</div>')
+    return (
+        f'<div class="card"><div class="row spread"><div class="row">'
+        f'<a class="name" href="{BASE}/device/{esc(dev)}">{esc(dev)}</a>'
+        f'<span class="dot{" on" if online else ""}"></span>'
+        f'<span class="small">{"на связи" if online else "нет связи"} · {local(seen) if seen else "никогда"}</span>'
+        f"</div>{signal_icon(st.get('csq'))}</div>"
+        f'<div class="row">{rec}<span class="chip">{ICON_FILE}{esc(d["format"]).upper()}</span>'
+        f'<span class="chip">{ICON_WAVE}{d["bitrate"] // 1000} kbps</span>'
+        f'<span class="small">{sched}</span></div>'
+        f"{sd}"
+        f'<div class="small">{st.get("pending", "–")} ждут · {len(today)} за день · '
+        f'{st.get("kbps", "–")} КБ/с{"".join("<br>" + esc(x) for x in lines)}</div>'
+        + (f'<div class="problems">{"<br>".join(map(esc, problems))}</div>' if problems else "")
+        + f"{last}</div>")
+
+
 @guarded
 async def index(request: Request):
     devs = devices.load()
     now = time.time()
-    rows = []
-    for dev, d in sorted(devs.items()):
-        seen = d.get("seen")
-        online = seen and now - seen < ONLINE_S
-        st = d.get("status", {})
-        rec_now, _ = devices.recording_now(d)
-        days = files_of(dev, 1)
-        today = days[0][1] if days else []
-        last = player(dev, days[0][0], today[0][0]) if today else '<span class="muted">нет</span>'
-        problems = [f"{STATUS_TITLES[k]}: {st[k]}" for k in ("dropped", "overflows", "rec_errors")
-                    if st.get(k)]
-        if st.get("reset") in BAD_RESETS:
-            problems.append(f"перезапуск: {RESETS[st['reset']]}")
-        lines, more = health(dev, d, now)
-        problems += more
-        rows.append(
-            f'<tr><td><a href="{BASE}/device/{esc(dev)}"><b>{esc(dev)}</b></a></td>'
-            f'<td class="{"ok" if online else "bad"}">{"на связи" if online else "нет связи"}'
-            f'<br><span class="muted">{local(seen) if seen else "никогда"}</span></td>'
-            f'<td>{"пишет" if st.get("rec") else "не пишет"}'
-            f'<br><span class="muted">{"по расписанию: " if d.get("schedule") else ""}'
-            f'{"запись" if rec_now else "пауза"} · {esc(d["format"])} {d["bitrate"] // 1000}</span></td>'
-            f'<td>{st.get("pending", "–")} ждут · {len(today)} за день'
-            f'<br><span class="muted">{st.get("kbps", "–")} КБ/с · сигнал {st.get("csq", "–")}'
-            f'{"".join("<br>" + esc(x) for x in lines)}</span></td>'
-            f'<td class="bad">{"<br>".join(map(esc, problems))}</td><td>{last}</td></tr>')
+    cards = "".join(device_card(dev, d, now) for dev, d in sorted(devs.items()))
     body = (
         "<h1>Hbox — устройства</h1>"
-        f'<div class="wrap"><table><tr><th>Устройство</th><th>Связь</th><th>Запись</th>'
-        f'<th>Файлы</th><th>Проблемы</th><th>Последний файл</th></tr>{"".join(rows)}</table></div>'
+        f'<div class="grid">{cards}</div>'
         f'<form class="box" method="post" action="{BASE}/add">Новое устройство: '
         '<input name="name" placeholder="cafe-1" pattern="[a-z0-9-]{1,32}" required> '
         '<button>Добавить</button> <span class="muted">латиница, цифры, дефис — начало имени файлов</span></form>'
