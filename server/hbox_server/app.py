@@ -55,7 +55,8 @@ NAME = re.compile(r"^[A-Za-z0-9-]{1,32}_(\d{8})_(\d{6})\.(mp3|m4a)$")
 
 # состояние устройства в запросе настроек (числа; см. firmware/main/uplink.c)
 STATUS_FIELDS = ("rec", "files", "pending", "dropped", "overflows", "rec_errors", "cpu", "csq",
-                 "up_errors", "sent", "kbps", "uptime", "reset")
+                 "up_errors", "sent", "kbps", "uptime", "reset", "sd_free", "sd_total",
+                 "pending_mb")
 
 
 def device_of(request: Request) -> str | None:

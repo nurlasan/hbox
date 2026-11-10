@@ -679,6 +679,25 @@ uint32_t store_pending(void)
 	return n;
 }
 
+void store_space(uint32_t *free_mb, uint32_t *total_mb, uint32_t *pending_mb)
+{
+	uint64_t total = 0, free = 0, pending = 0;
+
+	if (card) {
+		esp_vfs_fat_info(MOUNT, &total, &free);
+	}
+	xSemaphoreTake(lock, portMAX_DELAY);
+	for (int i = 0; i < FILES_MAX; i++) {
+		if (files[i].state == READY || files[i].state == SENDING) {
+			pending += files[i].info.size;
+		}
+	}
+	xSemaphoreGive(lock);
+	*free_mb = free >> 20;
+	*total_mb = total >> 20;
+	*pending_mb = (pending + (1 << 19)) >> 20;
+}
+
 uint32_t store_dropped(void)
 {
 	return dropped;

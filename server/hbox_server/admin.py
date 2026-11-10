@@ -28,7 +28,10 @@ STATUS_TITLES = {
     "rec_errors": "ошибки записи", "up_errors": "ошибки связи", "csq": "сигнал (0–31)",
     "cpu": "кодирование, %", "sent": "отправлено файлов", "kbps": "скорость, КБ/с",
     "files": "записано файлов", "uptime": "работает, мин", "reset": "причина перезапуска",
+    "pending_mb": "ждут отправки, МБ", "sd_free": "SD свободно", "sd_total": "SD всего",
 }
+QUEUE_BAD_H = 6     # отправка отстаёт больше чем на столько часов записи
+SD_BAD_DAYS = 2     # места на карте меньше чем на столько дней записи
 
 # esp_reset_reason_t (ESP-IDF 5.5)
 RESETS = {
@@ -41,7 +44,47 @@ BAD_RESETS = {4, 5, 6, 7, 9, 14, 15}
 
 
 def status_value(k: str, v) -> str:
-    return RESETS.get(v, str(v)) if k == "reset" else str(v)
+    if k == "reset":
+        return RESETS.get(v, str(v))
+    if k in ("sd_free", "sd_total"):
+        return f"{v / 1024:.1f} ГБ"
+    return str(v)
+
+
+def mb_per_hour(d: dict) -> float:
+    return d["bitrate"] / 8 * 3600 / 1e6
+
+
+def last_file(dev: str) -> float | None:
+    """mtime последнего целиком принятого файла"""
+    return max((m for _, items in files_of(dev, 2) for _, _, m in items), default=None)
+
+
+def health(dev: str, d: dict, now: float) -> tuple[list[str], list[str]]:
+    """(строки состояния карты и отправки, проблемы)"""
+    st, lines, problems = d.get("status", {}), [], []
+    rate = mb_per_hour(d)
+    if "pending_mb" in st:
+        hours = st["pending_mb"] / rate
+        lines.append(f"очередь {hours:.1f} ч записи ({st['pending_mb']} МБ)")
+        if hours > QUEUE_BAD_H:
+            problems.append(f"отправка отстаёт на {hours:.0f} ч")
+    if st.get("sd_total"):
+        days = st["sd_free"] / (rate * 24)
+        lines.append(f"SD свободно {st['sd_free'] / 1024:.1f} из {st['sd_total'] / 1024:.0f} ГБ "
+                     f"(≈ {days:.0f} дн записи)")
+        if days < SD_BAD_DAYS:
+            problems.append(f"на SD места на {days:.1f} дн")
+    elif "sd_total" in st:
+        problems.append("нет SD-карты")
+    last = last_file(dev)
+    if last:
+        ago = (now - last) / 3600
+        lines.append(f"последний файл на сервере {local(last)}"
+                     + (f" ({ago:.0f} ч назад)" if ago >= 1 else ""))
+        if ago > 3 and st.get("pending"):
+            problems.append(f"файлов не было {ago:.0f} ч")
+    return lines, problems
 
 STYLE = """
 body{font:15px/1.45 system-ui,sans-serif;margin:0;padding:16px;background:#f6f6f4;color:#222}
@@ -152,6 +195,8 @@ async def index(request: Request):
                     if st.get(k)]
         if st.get("reset") in BAD_RESETS:
             problems.append(f"перезапуск: {RESETS[st['reset']]}")
+        lines, more = health(dev, d, now)
+        problems += more
         rows.append(
             f'<tr><td><a href="{BASE}/device/{esc(dev)}"><b>{esc(dev)}</b></a></td>'
             f'<td class="{"ok" if online else "bad"}">{"на связи" if online else "нет связи"}'
@@ -160,7 +205,8 @@ async def index(request: Request):
             f'<br><span class="muted">{"по расписанию: " if d.get("schedule") else ""}'
             f'{"запись" if rec_now else "пауза"} · {esc(d["format"])} {d["bitrate"] // 1000}</span></td>'
             f'<td>{st.get("pending", "–")} ждут · {len(today)} за день'
-            f'<br><span class="muted">{st.get("kbps", "–")} КБ/с · сигнал {st.get("csq", "–")}</span></td>'
+            f'<br><span class="muted">{st.get("kbps", "–")} КБ/с · сигнал {st.get("csq", "–")}'
+            f'{"".join("<br>" + esc(x) for x in lines)}</span></td>'
             f'<td class="bad">{"<br>".join(map(esc, problems))}</td><td>{last}</td></tr>')
     body = (
         "<h1>Hbox — устройства</h1>"
@@ -199,6 +245,7 @@ async def device(request: Request):
     msg = {"saved": "Сохранено. Устройство получит настройки в течение 5 минут.",
            "added": "Устройство добавлено. Скачайте файл токена ниже и запустите его рядом с платой."}
     note = msg.get(request.query_params.get("msg", ""), "")
+    lines, problems = health(dev, d, time.time())
     body = (
         f'<p><a href="{BASE}/">← все устройства</a></p><h1>{esc(dev)}</h1>'
         + (f'<div class="box ok">{note}</div>' if note else "")
@@ -213,7 +260,9 @@ async def device(request: Request):
         f"<button>Сохранить</button></form>"
         f'<div class="box"><h2>Состояние</h2>'
         f'<p>{"Последняя связь: " + local(d["seen"]) if d.get("seen") else "Ещё не выходило на связь"}</p>'
-        f'<table style="width:auto">{status}</table></div>'
+        + "".join(f"<p>{esc(x)}</p>" for x in lines)
+        + "".join(f'<p class="bad">{esc(x)}</p>' for x in problems)
+        + f'<table style="width:auto">{status}</table></div>'
         f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
         f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>'
         f"{files or '<p class=muted>Файлов пока нет</p>'}")

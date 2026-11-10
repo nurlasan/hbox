@@ -281,3 +281,17 @@ def test_site_rejects_foreign_post(site):
     r = site.post("/hbox/admin/add", data={"name": "evil"}, headers={"Origin": "https://evil.example"},
                   auth=ADMIN)
     assert r.status_code == 403 and "evil" not in devices.load()
+
+
+def test_site_shows_queue_and_sd(site):
+    data = b"abc"
+    put(site, data, 0, 3, zlib.crc32(data))
+    site.get("/hbox/v1/config?pending=3&pending_mb=173&sd_free=1024&sd_total=30000&reset=9",
+             headers=AUTH)
+    page = site.get("/hbox/admin/", auth=ADMIN).text
+    # 128 кбит/с = 57.6 МБ/ч: 173 МБ ≈ 3 ч; 1 ГБ — меньше суток записи
+    assert "очередь 3.0 ч записи (173 МБ)" in page and "SD свободно 1.0 из 29 ГБ" in page
+    assert "на SD места на 0.7 дн" in page and "просадка питания" in page
+    assert "последний файл на сервере" in page
+    site.get("/hbox/v1/config?pending=0&sd_free=0&sd_total=0", headers=AUTH)
+    assert "нет SD-карты" in site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text

@@ -46,4 +46,6 @@ size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len);
 void store_sent(struct store_file *f);
 
 uint32_t store_pending(void);
+/* Для сайта, МБ: свободно и всего на карте (0 — карты нет), объём неотправленного. */
+void store_space(uint32_t *free_mb, uint32_t *total_mb, uint32_t *pending_mb);
 uint32_t store_dropped(void);

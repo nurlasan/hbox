@@ -140,7 +140,7 @@ static esp_err_t sock_connect(void)
 static int http(const char *method, const char *path, struct store_file *f, uint32_t body_off,
 		uint32_t body_len)
 {
-	char head[384];
+	char head[640];
 	size_t have = 0, need;
 	int code = -1, n;
 	char *body;
@@ -153,6 +153,9 @@ static int http(const char *method, const char *path, struct store_file *f, uint
 		     "%s %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"
 		     "Content-Length: %u\r\nContent-Type: application/octet-stream\r\n\r\n",
 		     method, path, SERVER, cfg->token, (unsigned)body_len);
+	if (n >= (int)sizeof(head)) {
+		return -1;
+	}
 	if (modem_sock_send(SOCK, head, n, 30000) != ESP_OK) {
 		goto broken;
 	}
@@ -258,19 +261,23 @@ static int json_bool(const char *key, int def)
 /* Настройки; заодно состояние устройства для сайта. Возвращает, через сколько секунд спросить снова. */
 static int fetch_config(void)
 {
-	char channel[sizeof(cfg->channel)], format[8], t[32], path[256];
+	char channel[sizeof(cfg->channel)], format[8], t[32], path[320];
 	struct recorder_stats rec;
+	uint32_t sd_free, sd_total, pending_mb;
 	int code;
 
 	recorder_get_stats(&rec);
+	store_space(&sd_free, &sd_total, &pending_mb);
 	snprintf(path, sizeof(path),
 		 "/hbox/v1/config?rec=%d&files=%lu&pending=%lu&dropped=%lu&overflows=%lu&rec_errors=%lu"
-		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld&reset=%d",
+		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld&reset=%d"
+		 "&sd_free=%lu&sd_total=%lu&pending_mb=%lu",
 		 rec.recording, (unsigned long)rec.files, (unsigned long)store_pending(),
 		 (unsigned long)store_dropped(), (unsigned long)rec.overflows, (unsigned long)rec.errors,
 		 (unsigned long)rec.cpu10 / 10, stats.csq, (unsigned long)stats.errors,
 		 (unsigned long)stats.sent_files, (unsigned long)stats.kbps10 / 10,
-		 esp_timer_get_time() / 60000000, (int)esp_reset_reason());
+		 esp_timer_get_time() / 60000000, (int)esp_reset_reason(), (unsigned long)sd_free,
+		 (unsigned long)sd_total, (unsigned long)pending_mb);
 	code = http("GET", path, NULL, 0, 0);
 
 	if (code != 200) {
