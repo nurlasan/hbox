@@ -34,10 +34,8 @@ esp_err_t modem_wait(const char *prefix, char *out, int timeout_ms);
 
 /* --- PPP: модем — «труба», TCP/TLS на ESP (lwIP) --- */
 
-/* Команда набора (ATD*99# и т. п.) — CONNECT, дальше по UART идут кадры PPP. В out — ответ при ошибке. */
-esp_err_t modem_dial(const char *cmd, char *out);
-/* Команда и все строки ответа — в лог (диагностика). */
-void modem_at_log(const char *cmd, int timeout_ms);
+/* ATD*99# — CONNECT, дальше по UART идут кадры PPP. В out — ответ модема при ошибке. */
+esp_err_t modem_dial(char *out);
 /* Сырые байты PPP в обе стороны (пока модем в режиме данных). */
 void modem_raw_write(const void *data, size_t len);
 int modem_raw_read(void *buf, size_t len, int timeout_ms);
