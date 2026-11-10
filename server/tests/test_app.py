@@ -63,29 +63,51 @@ def test_rewind_drops_broken_tail(client, tmp_path):
     assert (tmp_path / "cafe-1" / "2026-11-10" / NAME).read_bytes() == data
 
 
+def good_points(check: str, data: bytes) -> list[int]:
+    return [int(off) for off, crc in (item.split(":") for item in check.split(","))
+            if int(crc, 16) == zlib.crc32(data[:int(off)])]
+
+
 def test_checkpoints_find_broken_tail(client):
     data = os.urandom(200_000)
     broken = data[:100_000] + os.urandom(8192)
     put(client, broken, 0, len(data), zlib.crc32(data))
     r = client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json()
-    check = dict(item.split(":") for item in r["check"].split(","))
-    step = hbox.CHECK_STEP
-    assert list(map(int, check)) == [step, 2 * step, 3 * step, 108_192]
-    # совпадают только точки до места порчи
-    good = [int(off) for off, crc in check.items() if int(crc, 16) == zlib.crc32(data[:int(off)])]
-    assert good == [step, 2 * step, 3 * step]
+    offs = [int(item.split(":")[0]) for item in r["check"].split(",")]
+    good = good_points(r["check"], broken)
+    assert offs[-1] == 108_192 and good == offs  # CRC — по тому, что лежит на сервере
+    # совпадают с файлом только точки до места порчи, и последняя — недалеко от неё
+    good = good_points(r["check"], data)
+    assert good == [o for o in offs if o <= 100_000] and good[-1] > 100_000 - 108_192 // 8
 
 
 def test_checkpoints_cover_whole_file(tmp_path):
     data = os.urandom(1_000_000)
     part = tmp_path / "f.part"
     part.write_bytes(data)
-    check = [item.split(":") for item in hbox.checkpoints(part, len(data)).split(",")]
-    offs = [int(off) for off, _ in check]
-    step = hbox.CHECK_STEP
-    assert offs[0] == 3 * step and offs[-5:] == [27 * step, 28 * step, 29 * step, 30 * step, len(data)]
-    assert len(offs) <= 12 and offs == sorted(set(offs))
-    assert all(int(crc, 16) == zlib.crc32(data[:int(off)]) for off, crc in check)
+    check = hbox.checkpoints(part, len(data), 600_000)
+    offs = [int(item.split(":")[0]) for item in check.split(",")]
+    assert offs[-1] == len(data) and offs == sorted(set(offs)) and 600_000 in offs
+    assert len(offs) <= 14 and len(check) < 320  # буфер "check" на устройстве — 320 байт
+    assert good_points(check, data) == offs
+
+
+def test_rewind_stays_in_unverified_tail(client):
+    """Обрыв посреди куска: порча в непроверенном хвосте не откатывает за проверенное."""
+    data = os.urandom(4 << 20)
+    crc, mb = zlib.crc32(data), 1 << 20
+    for k in range(3):  # три куска по 1 МБ проверены по upto
+        chunk = data[k * mb:(k + 1) * mb]
+        r = client.put(f"/hbox/v1/files/{NAME}?offset={k * mb}&total={len(data)}&crc={crc:08x}"
+                       f"&upto={zlib.crc32(data[:(k + 1) * mb]):08x}", content=chunk, headers=AUTH)
+        assert r.json()["size"] == (k + 1) * mb
+    # четвёртый оборвался: 600 КБ дошли, но с порчей на 200 КБ от начала куска
+    bad = 3 * mb + 200_000
+    tail = data[3 * mb:bad] + os.urandom(1000) + data[bad + 1000:3 * mb + 600_000]
+    put(client, tail, 3 * mb, len(data), crc)
+    r = client.get(f"/hbox/v1/files/{NAME}", headers=AUTH).json()
+    good = good_points(r["check"], data)
+    assert 3 * mb in good and bad - 600_000 // 8 < good[-1] <= bad
 
 
 def test_parts_with_upto(client, tmp_path):

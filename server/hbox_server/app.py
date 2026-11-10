@@ -43,11 +43,13 @@ MIN_FREE_GB = float(os.environ.get("HBOX_MIN_FREE_GB", "3"))
 RETENTION_DAYS = float(os.environ.get("HBOX_RETENTION_DAYS", "7"))
 # недокачанный файл, к которому никто не возвращается, — удалить
 PARTIAL_DAYS = 7
-# контрольные точки для докачки: CRC начала файла на границах CHECK_STEP — последние CHECK_LAST
-# и CHECK_SPREAD точек по всему файлу (порча бывает и задолго до обрыва)
+# контрольные точки для докачки: CRC начала файла — CHECK_SPREAD точек по всему файлу (порча бывает и
+# задолго до обрыва), конец последнего проверенного куска (ok) и CHECK_TAIL точек в непроверенном хвосте
+# ok..size (до 1 МБ после обрыва). Всего ≤ 14 точек: у устройства под "check" 320 байт.
 CHECK_STEP = 32768
-CHECK_LAST = 4
-CHECK_SPREAD = 8
+CHECK_SPREAD = 4
+CHECK_TAIL = 8
+PART_MAX = 1 << 20  # кусок PUT на устройстве
 
 NAME = re.compile(r"^[A-Za-z0-9-]{1,32}_(\d{8})_(\d{6})\.(mp3|m4a)$")
 
@@ -80,24 +82,25 @@ def load_state(state: Path) -> dict:
         return {"size": 0, "crc": 0}
 
 
-def save_state(state: Path, size: int, crc: int, total: int):
+def save_state(state: Path, size: int, crc: int, total: int, ok: int):
+    """ok — докуда принятое проверено (upto куска сошёлся)"""
     tmp = state.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"size": size, "crc": crc, "total": total}))
+    tmp.write_text(json.dumps({"size": size, "crc": crc, "total": total, "ok": ok}))
     tmp.replace(state)
 
 
-def checkpoints(part: Path, size: int) -> str:
-    """CRC-32 начала недокачанного файла: на границах CHECK_STEP по всему файлу, у конца и на size.
+def checkpoints(part: Path, size: int, ok: int | None = None) -> str:
+    """CRC-32 начала недокачанного файла: несколько точек по всему файлу, на ok, часто в хвосте ok..size
+    и на size.
 
     Модем изредка теряет байты, и хвост на сервере приходит испорченным. Устройство сверяет
     эти CRC со своими и продолжает с последней совпавшей точки (раньше — тогда хвост отбрасывается).
     """
-    last = size // CHECK_STEP
-    marks = {size * k // CHECK_SPREAD // CHECK_STEP for k in range(1, CHECK_SPREAD)}
-    marks |= set(range(max(1, last - CHECK_LAST + 1), last + 1))
-    offsets = sorted(m * CHECK_STEP for m in marks if m)
-    if size and size not in offsets:
-        offsets.append(size)
+    if ok is None or not 0 <= ok <= size:
+        ok = max(0, size - PART_MAX)  # старое состояние без ok: хвост не длиннее куска
+    offsets = {size * k // CHECK_SPREAD // CHECK_STEP * CHECK_STEP for k in range(1, CHECK_SPREAD)}
+    offsets |= {ok + (size - ok) * k // (CHECK_TAIL + 1) for k in range(CHECK_TAIL + 1)}
+    offsets = sorted(o for o in offsets if 0 < o < size) + ([size] if size else [])
     out, crc, pos = [], 0, 0
     with open(part, "rb") as f:
         for off in offsets:
@@ -132,7 +135,7 @@ async def file_status(request: Request):
     st = load_state(state)
     # размер по файлу: состояние могло не успеть записаться при обрыве
     size = min(st["size"], part.stat().st_size) if part.exists() else 0
-    check = await asyncio.to_thread(checkpoints, part, size) if size else ""
+    check = await asyncio.to_thread(checkpoints, part, size, st.get("ok")) if size else ""
     return JSONResponse({"size": size, "done": False, "check": check})
 
 
@@ -164,6 +167,7 @@ async def file_put(request: Request):
         if offset > size:
             return error(409, "offset mismatch", size=size)
         crc = st["crc"] if size else 0
+        ok = min(st.get("ok", max(0, size - PART_MAX)), size)
         if offset < size:
             # устройство знает, докуда модем точно передал; хвост после обрыва мог прийти с дырой
             log.info("%s %s: rewind %d -> %d", dev, name, size, offset)
@@ -175,6 +179,7 @@ async def file_put(request: Request):
                     crc = zlib.crc32(chunk, crc)
                     left -= len(chunk)
             size = offset
+            ok = min(ok, offset)
         start_crc = crc
         try:
             with open(part, "r+b" if part.exists() else "wb") as f:
@@ -199,8 +204,10 @@ async def file_put(request: Request):
                 with open(part, "r+b") as f:
                     f.truncate(size)
                 return error(422, "part crc mismatch", size=size)
+            if upto is not None and size == offset + body_len:
+                ok = size
         finally:
-            save_state(state, size, crc, total)
+            save_state(state, size, crc, total, ok)
 
         if size < total:
             return JSONResponse({"size": size, "done": False})
