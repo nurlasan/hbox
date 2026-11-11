@@ -36,23 +36,27 @@ void recorder_get_stats(struct recorder_stats *st)
 	st->overflows = mic_overflows();
 }
 
-/* Пора закрывать файл: прошла граница периода UTC, а без времени — длительность. */
-static bool due(int64_t start_us)
+/* Пора закрывать файл: прошла граница периода UTC, а без времени — длительность.
+ * Конец периода считается один раз, как только известно время: поправки часов с сервера
+ * (±несколько секунд из-за задержки сети) не должны переносить начало файла за границу. */
+static bool due(int64_t start_us, int64_t *end)
 {
-	int64_t now_us = esp_timer_get_time();
-	int64_t start = clock_at(start_us);
+	if (!*end) {
+		int64_t start = clock_at(start_us);
 
-	if (!start) {
-		return now_us - start_us >= (int64_t)STORE_FILE_SECONDS * 1000000;
+		if (!start) {
+			return esp_timer_get_time() - start_us >= (int64_t)STORE_FILE_SECONDS * 1000000;
+		}
+		*end = (start / STORE_FILE_SECONDS + 1) * STORE_FILE_SECONDS;
 	}
-	return clock_now() >= (start / STORE_FILE_SECONDS + 1) * STORE_FILE_SECONDS;
+	return clock_now() >= *end;
 }
 
 static void task(void *arg)
 {
 	static int16_t pcm[FRAME_MAX];
 	struct store_file *f = NULL;
-	int64_t start_us = 0, busy = 0, audio_us = 0;
+	int64_t start_us = 0, end = 0, busy = 0, audio_us = 0;
 	size_t frame = 0;
 
 	for (;;) {
@@ -73,6 +77,7 @@ static void task(void *arg)
 				continue;
 			}
 			start_us = esp_timer_get_time();
+			end = 0;
 			f = store_create(start_us, clock_now(), ext);
 			frame = f ? enc_start(f, ext, bitrate) : 0;
 			if (!frame) {
@@ -102,7 +107,7 @@ static void task(void *arg)
 			busy = audio_us = 0;
 		}
 
-		if (fail || !record || due(start_us)) {
+		if (fail || !record || due(start_us, &end)) {
 			enc_finish();
 			store_close(f);
 			f = NULL;
