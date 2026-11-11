@@ -264,7 +264,7 @@ async def config(request: Request):
     record, recheck = devices.recording_now(d)
     answer = {"record": record, "format": d["format"], "bitrate": d["bitrate"],
               "recheck": recheck, "channel": dev,
-              "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+              "time": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
     ota = d.get("ota")
     if ota and ota["version"] not in (status.get("fw"), status.get("fw_bad")):
         answer.update(ota_name=ota["name"], ota_size=ota["size"], ota_crc=f"{ota['crc']:08x}",

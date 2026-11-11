@@ -146,6 +146,9 @@ typedef bool (*http_sink)(const uint8_t *data, size_t len, void *ctx);
  * Ответ — в resp (тело), а если задан sink — тело любой длины потоком в sink.
  * Возвращает код HTTP или -1 при обрыве (принятое до обрыва sink уже получил).
  */
+/* esp_timer отправки последнего запроса и прихода заголовков ответа — для часов */
+static int64_t req_us, ans_us;
+
 static int http_ex(const char *method, const char *path, struct store_file *f, uint32_t body_off,
 		   uint32_t body_len, http_sink sink, void *ctx)
 {
@@ -165,6 +168,7 @@ static int http_ex(const char *method, const char *path, struct store_file *f, u
 	if (n >= (int)sizeof(head)) {
 		return -1;
 	}
+	req_us = esp_timer_get_time();
 	if (modem_sock_send(SOCK, head, n, 30000) != ESP_OK) {
 		goto broken;
 	}
@@ -192,6 +196,7 @@ static int http_ex(const char *method, const char *path, struct store_file *f, u
 		have += n;
 		resp[have] = '\0';
 	}
+	ans_us = esp_timer_get_time();
 	if (sscanf(resp, "HTTP/1.%*d %d", &code) != 1) {
 		goto broken;
 	}
@@ -556,7 +561,7 @@ static int fetch_config(void)
 	if (json_str("time", t, sizeof(t))) {
 		bool first = !clock_valid();
 
-		if (clock_set_iso(t) && first) {
+		if (clock_set_iso(t, req_us, ans_us) && first) {
 			printf("HBOX UP time from server %s\n", t);
 		}
 	}

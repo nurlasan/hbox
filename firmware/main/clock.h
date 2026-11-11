@@ -14,5 +14,5 @@ int64_t clock_now(void);
 int64_t clock_at(int64_t us);
 /* Гражданская дата UTC → секунды Unix. */
 int64_t clock_utc(int y, int mo, int d, int h, int mi, int s);
-/* "2026-11-10T09:00:00Z" */
-bool clock_set_iso(const char *s);
+/* "2026-11-10T09:00:00.123Z" от сервера; sent_us/got_us — esp_timer отправки запроса и прихода ответа. */
+bool clock_set_iso(const char *s, int64_t sent_us, int64_t got_us);
