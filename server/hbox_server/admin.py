@@ -151,6 +151,9 @@ color:var(--rec);border:1.5px solid var(--rec);border-radius:8px;padding:2px 9px
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1);box-shadow:0 0 0 0 rgba(239,68,68,.55)}
 50%{opacity:.35;transform:scale(.8);box-shadow:0 0 0 6px rgba(239,68,68,0)}}
 @media (prefers-reduced-motion:reduce){.rec i{animation:none}}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:0 0 16px;overflow-x:auto}
+.tab{padding:8px 14px;border-bottom:2px solid transparent;color:var(--muted);white-space:nowrap}
+.tab:hover{color:var(--text);text-decoration:none} .tab.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 .sd,.net{display:flex;align-items:center;gap:10px}
 .net svg{width:22px;height:22px;flex:none;fill:none;stroke:var(--accent,#2f7de1);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .sd svg{width:22px;height:26px;flex:none;fill:none;stroke:var(--muted);stroke-width:1.6}
@@ -370,10 +373,8 @@ async def device(request: Request):
            "added": "Устройство добавлено. Скачайте файл токена ниже и запустите его рядом с платой."}
     note = msg.get(request.query_params.get("msg", ""), "")
     lines, problems = health(dev, d, time.time())
-    body = (
-        f'<p><a href="{BASE}/">← все устройства</a></p><h1>{esc(dev)}</h1>'
-        + (f'<div class="box ok">{note}</div>' if note else "")
-        + f'<form class="box" method="post">'
+    settings = (
+        f'<form class="box" method="post">'
         f'<label><input type="checkbox" name="record"{" checked" if d.get("record", True) else ""}> '
         f"Запись включена</label><br><br>Формат <select name=\"format\">{fmt}</select> "
         f'Битрейт <select name="bitrate">{br}</select>'
@@ -381,16 +382,30 @@ async def device(request: Request):
         f'{" checked" if d.get("schedule") else ""}> писать только в часы работы</label>'
         f'<table style="width:auto">{rows}</table><p class="muted">Пустая строка — в этот день не писать. '
         f"23:00-02:00 — через полночь. Новые настройки — с начала следующего файла.</p>"
-        f"<button>Сохранить</button></form>"
-        f'<div class="box"><h2>Состояние</h2>'
+        f"<button>Сохранить</button></form>")
+    state = (
+        f'<div class="grid">{device_card(dev, d, time.time())}'
+        f'<div class="box" style="margin:0"><h2 style="margin-top:0">Подробно</h2>'
         f'<p>{"Последняя связь: " + local(d["seen"]) if d.get("seen") else "Ещё не выходило на связь"}</p>'
         + "".join(f"<p>{esc(x)}</p>" for x in lines)
         + "".join(f'<p class="bad">{esc(x)}</p>' for x in problems)
-        + f'<table style="width:auto">{status}</table></div>'
-        + firmware_box(dev, d)
-        + f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
-        f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>'
-        f"{files or '<p class=muted>Файлов пока нет</p>'}")
+        + f'<table style="width:auto">{status}</table></div></div>')
+    token = (f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
+             f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>')
+    tabs = {"state": ("Состояние", state),
+            "files": ("Записи", files or "<p class=muted>Файлов пока нет</p>"),
+            "settings": ("Настройки", settings),
+            "fw": ("Прошивка", firmware_box(dev, d)),
+            "token": ("Токен", token)}
+    tab = request.query_params.get("tab", "")
+    tab = tab if tab in tabs else {"saved": "settings", "ota": "fw", "added": "token"}.get(
+        request.query_params.get("msg", ""), "state")
+    nav = "".join(f'<a class="tab{" on" if k == tab else ""}" href="{BASE}/device/{esc(dev)}?tab={k}">{t}</a>'
+                  for k, (t, _) in tabs.items())
+    body = (
+        f'<p><a href="{BASE}/">← все устройства</a></p><h1>{esc(dev)}</h1>'
+        + (f'<div class="box ok">{note}</div>' if note else "")
+        + f'<nav class="tabs">{nav}</nav>{tabs[tab][1]}')
     return page(f"Hbox — {dev}", body)
 
 

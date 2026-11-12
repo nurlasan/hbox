@@ -315,6 +315,15 @@ def test_traffic_and_operator(site):
     assert "op" not in devices.load()["cafe-1"]["status"]
 
 
+def test_device_tabs(site):
+    page = site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text
+    assert 'class="tab on" href="/hbox/admin/device/cafe-1?tab=state"' in page and "Подробно" in page
+    assert "Сохранить" not in page
+    assert "Сохранить" in site.get("/hbox/admin/device/cafe-1?tab=settings", auth=ADMIN).text
+    assert "Загрузить и обновить" in site.get("/hbox/admin/device/cafe-1?msg=ota", auth=ADMIN).text
+    assert "Подробно" in site.get("/hbox/admin/device/cafe-1?tab=nonsense", auth=ADMIN).text
+
+
 def fake_image(version: str, project: str = "hbox", size: int = 40_000) -> bytes:
     """Похоже на образ ESP-IDF: 0xE9, esp_app_desc_t с версией и проектом."""
     blob = bytearray(os.urandom(size))
@@ -341,7 +350,7 @@ def test_ota_flow(site):
     r = site.get("/hbox/v1/config?fw=old1", headers=AUTH).json()
     assert r["ota_version"] == "abc1234" and r["ota_size"] == len(blob)
     assert r["ota_crc"] == f"{zlib.crc32(blob):08x}" and r["ota_name"] == ota["name"]
-    assert "ждёт обновления до abc1234" in site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text
+    assert "ждёт обновления до abc1234" in site.get("/hbox/admin/device/cafe-1?tab=fw", auth=ADMIN).text
     # качает кусками
     fw = f"/hbox/v1/firmware/{ota['name']}"
     got = b"".join(site.get(fw, params={"offset": o, "len": 16384}, headers=AUTH).content
@@ -357,7 +366,7 @@ def test_ota_flow(site):
                     headers=AUTH).status_code == 404
     # обновилась — больше не предлагаем
     assert "ota_version" not in site.get("/hbox/v1/config?fw=abc1234", headers=AUTH).json()
-    assert "обновлена до abc1234" in site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text
+    assert "обновлена до abc1234" in site.get("/hbox/admin/device/cafe-1?tab=fw", auth=ADMIN).text
     # откат: не предлагаем снова, на сайте — проблема
     assert "ota_version" not in site.get("/hbox/v1/config?fw=old1&fw_bad=abc1234", headers=AUTH).json()
     assert "прошивка abc1234 не запустилась" in site.get("/hbox/admin/", auth=ADMIN).text
