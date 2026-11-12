@@ -350,6 +350,15 @@ def test_firmware_from_github(site, monkeypatch):
     assert "Нет такой сборки" in bad.text
 
 
+def test_api_under_cloudflare_prefix(client):
+    data = b"xyz"
+    r = client.put(f"/hbox/admin/dev/v1/files/{NAME}", params={"offset": 0, "total": 3, "crc": f"{zlib.crc32(data):08x}"},
+                   content=data, headers=AUTH)
+    assert r.json()["done"] is True
+    assert client.get("/hbox/admin/dev/v1/config", headers=AUTH).status_code == 200
+    assert client.get("/hbox/admin/dev/v1/config").status_code == 401
+
+
 def test_route_setting(site):
     assert "route" not in site.get("/hbox/v1/config", headers=AUTH).json()
     devices.update("cafe-1", route="cf")

@@ -35,9 +35,10 @@ static const struct route {
 	int port;
 	int ssl_id;
 	const char *name;
+	const char *api; /* чем заменить "/hbox/v1" в пути: тоннель Cloudflare пропускает только /hbox/admin* */
 } routes[] = {
-	{"178.104.149.56", 18443, 1, "direct"},
-	{"hbox.fabtech.uz", 443, 2, "cf"},
+	{"178.104.149.56", 18443, 1, "direct", "/hbox/v1"},
+	{"hbox.fabtech.uz", 443, 2, "cf", "/hbox/admin/dev/v1"},
 };
 #define ROUTE_FAILS 3 /* столько неудачных соединений подряд — пробуем другой путь */
 static int route, route_fails;
@@ -212,9 +213,11 @@ static int http_ex(const char *method, const char *path, struct store_file *f, u
 		return -1;
 	}
 	n = snprintf(head, sizeof(head),
-		     "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: hbox/%s\r\nAuthorization: Bearer %s\r\n"
+		     "%s %s%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: hbox/%s\r\nAuthorization: Bearer %s\r\n"
 		     "Content-Length: %u\r\nContent-Type: application/octet-stream\r\n\r\n",
-		     method, path, routes[route].host, fw_version(), cfg->token, (unsigned)body_len);
+		     method, strncmp(path, "/hbox/v1", 8) ? "" : routes[route].api,
+		     strncmp(path, "/hbox/v1", 8) ? path : path + 8, routes[route].host, fw_version(), cfg->token,
+		     (unsigned)body_len);
 	if (n >= (int)sizeof(head)) {
 		return -1;
 	}

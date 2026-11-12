@@ -361,12 +361,20 @@ async def lifespan(app):
     task.cancel()
 
 
+API = [
+    Route("/files/{name}", file_status, methods=["GET"]),
+    Route("/files/{name}", file_put, methods=["PUT"]),
+    Route("/config", config, methods=["GET"]),
+    Route("/firmware/{name}", firmware_get, methods=["GET"]),
+]
+# Запасной путь устройства через Cloudflare (hbox.fabtech.uz:443): тоннель пропускает только
+# /hbox/admin*, поэтому то же API ещё и под /hbox/admin/dev/v1 (вход — по токену устройства).
+CF_API_PREFIX = "/hbox/admin/dev/v1"
+
 app = Starlette(
     routes=[
-        Route("/hbox/v1/files/{name}", file_status, methods=["GET"]),
-        Route("/hbox/v1/files/{name}", file_put, methods=["PUT"]),
-        Route("/hbox/v1/config", config, methods=["GET"]),
-        Route("/hbox/v1/firmware/{name}", firmware_get, methods=["GET"]),
+        Mount("/hbox/v1", routes=API),
+        Mount(CF_API_PREFIX, routes=API),
         Route("/hbox/speedtest", speedtest, methods=["POST"]),
         Mount("/hbox/admin", routes=admin.routes),
         # https://hbox.fabtech.uz/ — сразу на сайт
