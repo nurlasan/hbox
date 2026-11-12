@@ -28,17 +28,18 @@ extern const char ca_pem_start[] asm("_binary_hbox_ca_pem_start");
 extern const char ca_pem_end[] asm("_binary_hbox_ca_pem_end");
 extern const char cf_pem_start[] asm("_binary_cf_roots_pem_start");
 
-/* Пути до сервера: напрямую (наш CA) и запасной через Cloudflare — обычный HTTPS на 443 с именем,
+/* Пути до сервера: напрямую (наш CA) и запасной через Cloudflare (корень GTS Root R4 — им подписан
+ * hbox.fabtech.uz; сменит Cloudflare удостоверяющий центр — заменить cf_roots.pem) — обычный HTTPS на 443 с именем,
  * его не режут операторы, которые режут TLS на нестандартный порт по IP (Kcell с 12.11.2026). */
 static const struct route {
 	const char *host;
 	int port;
 	int ssl_id;
 	const char *name;
-	const char *api; /* чем заменить "/hbox/v1" в пути: тоннель Cloudflare пропускает только /hbox/admin* */
+	const char *api; /* начало пути API */
 } routes[] = {
 	{"178.104.149.56", 18443, 1, "direct", "/hbox/v1"},
-	{"hbox.fabtech.uz", 443, 2, "cf", "/hbox/admin/dev/v1"},
+	{"hbox.fabtech.uz", 443, 2, "cf", "/hbox/v1"},
 };
 #define ROUTE_FAILS 3 /* столько неудачных соединений подряд — пробуем другой путь */
 static int route, route_fails;
@@ -74,22 +75,16 @@ static void set_state(const char *s)
 
 /* --- модем и TLS --- */
 
-/* Сертификат кусками по 1 КБ (AT+MSSLCERTWR с остатком): 6 КБ одним куском модем без
- * управления потоком на UART не принимает. */
+/* Сертификат одним куском, как в примере документации: запись кусками (remain_length) модем
+ * не принял (9f13f54), а 6 КБ одним куском — тоже (f346022). Поэтому у Cloudflare один корень. */
 static esp_err_t cert_write(const char *name, const char *pem)
 {
 	char cmd[96];
-	size_t len = strlen(pem);
 
-	for (size_t off = 0; off < len;) {
-		size_t n = len - off < 1024 ? len - off : 1024;
-
-		snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",%u,%u", name, (unsigned)(len - off - n), (unsigned)n);
-		if (modem_at_data(cmd, pem + off, n, 5000) != ESP_OK) {
-			printf("HBOX UP cert %s failed at %u of %u\n", name, (unsigned)off, (unsigned)len);
-			return ESP_FAIL;
-		}
-		off += n;
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",0,%u", name, (unsigned)strlen(pem));
+	if (modem_at_data(cmd, pem, strlen(pem), 5000) != ESP_OK) {
+		printf("HBOX UP cert %s failed\n", name);
+		return ESP_FAIL;
 	}
 	return ESP_OK;
 }
