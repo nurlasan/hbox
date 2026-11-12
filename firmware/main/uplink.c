@@ -46,6 +46,9 @@ static int route, route_fails;
 static bool cf_ready; /* сертификаты Cloudflare в модеме — без них запасной путь не пробуем */
 static const char *fw_version(void);
 static char route_want[8] = ""; /* сервер может закрепить путь: "direct" / "cf" */
+/* закреплённый путь не соединился ROUTE_FAILS раз подряд — не держимся за него, пока сервер не
+ * пришлёт другое значение: иначе устройство не получит и саму отмену закрепления */
+static bool pin_failed;
 
 static struct settings *cfg;
 static struct uplink_stats stats = {.state = "modem", .csq = -1};
@@ -188,7 +191,7 @@ static esp_err_t sock_connect(void)
 	sock_close();
 	modem_sock_reset();
 	for (int i = 0; i < 2; i++) {
-		if (route_want[0] && !strcmp(route_want, routes[i].name)) {
+		if (route_want[0] && !pin_failed && !strcmp(route_want, routes[i].name)) {
 			route = i;
 		}
 	}
@@ -201,7 +204,8 @@ static esp_err_t sock_connect(void)
 	if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+MIPOPEN:", line, 70000) != ESP_OK ||
 	    !strstr(line, ",0")) {
 		printf("HBOX UP connect failed (%s) %s\n", r->name, line);
-		if (++route_fails >= ROUTE_FAILS && !route_want[0] && (cf_ready || route)) {
+		if (++route_fails >= ROUTE_FAILS && (cf_ready || route)) {
+			pin_failed = route_want[0] != '\0';
 			route = !route;
 			route_fails = 0;
 			printf("HBOX UP route -> %s\n", routes[route].name);
@@ -653,6 +657,7 @@ static int fetch_config(void)
 	json_str("route", want, sizeof(want));
 	if (strcmp(want, route_want)) {
 		strcpy(route_want, want);
+		pin_failed = false;
 		printf("HBOX UP route set by server: %s\n", want[0] ? want : "auto");
 	}
 	if (json_str("channel", channel, sizeof(channel))) {
