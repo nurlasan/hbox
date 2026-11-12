@@ -3,12 +3,16 @@
 Вход — логин admin и пароль HBOX_ADMIN_PASSWORD (.env), HTTP Basic. Время на страницах — Asia/Almaty.
 """
 
+import asyncio
 import base64
 import html
+import json
+import logging
 import os
 import re
 import secrets
 import time
+import urllib.request
 import zlib
 from datetime import datetime
 from urllib.parse import urlparse
@@ -18,6 +22,8 @@ from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Re
 from starlette.routing import Route
 
 from . import devices
+
+log = logging.getLogger("hbox")
 
 DEV_NAME = re.compile(r"^[a-z0-9-]{1,32}$")
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -92,7 +98,7 @@ def health(dev: str, d: dict, now: float) -> tuple[list[str], list[str]]:
     return lines, problems
 
 
-def firmware_box(dev: str, d: dict) -> str:
+def firmware_box(dev: str, d: dict, rels: list[dict]) -> str:
     st, ota = d.get("status", {}), d.get("ota")
     if not ota:
         state = "обновлений не назначено"
@@ -107,11 +113,27 @@ def firmware_box(dev: str, d: dict) -> str:
     cancel = (f'<form method="post" action="{BASE}/device/{esc(dev)}/firmware" style="display:inline">'
               f'<input type="hidden" name="cancel" value="1"><button>Отменить</button></form>'
               if ota and st.get("fw") != ota["version"] else "")
-    return (f'<div class="box"><h2>Прошивка</h2><p>Сейчас: <b>{esc(st.get("fw", "?"))}</b> · {state} {cancel}</p>'
+    cur = st.get("fw")
+    rows = ""
+    for r in rels:
+        when = local(datetime.fromisoformat(r["date"].replace("Z", "+00:00")).timestamp()) if r["date"] else ""
+        if r["version"] == cur:
+            act = '<span class="ok">установлена</span>'
+        else:
+            act = (f'<form method="post" action="{BASE}/device/{esc(dev)}/firmware" style="margin:0;display:inline">'
+                   f'<input type="hidden" name="release" value="{esc(r["version"])}"><button>Установить</button></form>')
+        if r.get("zip"):
+            act += f' <a class="small" href="{esc(r["zip"])}">zip для USB</a>'
+        rows += (f'<tr><td><b>{esc(r["version"])}</b><div class="small">{esc(r["title"])}</div></td>'
+                 f'<td class="small">{esc(when)}</td><td>{act}</td></tr>')
+    gh = (f'<h2>Сборки с GitHub</h2><table>{rows}</table>' if rows else
+          '<p class="muted">Сборки с GitHub не получены (нет связи с GitHub или ещё нет релизов).</p>')
+    return (f'<div class="box"><h2>Прошивка</h2><p>Сейчас: <b>{esc(cur or "?")}</b> · {state} {cancel}</p>{gh}'
+            f'<details><summary class="small">или файл с компьютера</summary>'
             f'<form method="post" action="{BASE}/device/{esc(dev)}/firmware" enctype="multipart/form-data">'
             f'<input type="file" name="firmware" accept=".bin" required> <button>Загрузить и обновить</button>'
-            f'</form><p class="muted">Файл hbox.bin из архива прошивки. Если новая прошивка не выйдет на '
-            f"связь, устройство само вернётся на прежнюю.</p></div>")
+            f'</form></details><p class="muted">Устройство скачает прошивку при следующей связи (до 5 минут). '
+            f"Если новая прошивка не выйдет на связь, устройство само вернётся на прежнюю.</p></div>")
 
 STYLE = """
 :root{--bg:#f4f5f7;--card:#fff;--line:#e4e6ea;--text:#1d1f23;--muted:#6b7280;--accent:#2563eb;
@@ -372,12 +394,14 @@ async def device(request: Request):
            "ota": "Прошивка загружена. Устройство обновится при следующей связи (до 5 минут).",
            "added": "Устройство добавлено. Скачайте файл токена ниже и запустите его рядом с платой."}
     note = msg.get(request.query_params.get("msg", ""), "")
+    route = "".join(f'<option value="{k}"{" selected" if k == (d.get("route") or "") else ""}>{t}</option>'
+                    for k, t in {"": "авто (сама переключается)", **devices.ROUTES}.items())
     lines, problems = health(dev, d, time.time())
     settings = (
         f'<form class="box" method="post">'
         f'<label><input type="checkbox" name="record"{" checked" if d.get("record", True) else ""}> '
         f"Запись включена</label><br><br>Формат <select name=\"format\">{fmt}</select> "
-        f'Битрейт <select name="bitrate">{br}</select>'
+        f'Битрейт <select name="bitrate">{br}</select><br><br>Связь <select name="route">{route}</select>'
         f'<h2>Расписание (время Алматы)</h2><label><input type="checkbox" name="use_schedule"'
         f'{" checked" if d.get("schedule") else ""}> писать только в часы работы</label>'
         f'<table style="width:auto">{rows}</table><p class="muted">Пустая строка — в этот день не писать. '
@@ -392,13 +416,13 @@ async def device(request: Request):
         + f'<table style="width:auto">{status}</table></div></div>')
     token = (f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
              f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>')
+    tab_wanted = request.query_params.get("tab", "") or {"ota": "fw"}.get(request.query_params.get("msg", ""), "")
     tabs = {"state": ("Состояние", state),
             "files": ("Записи", files or "<p class=muted>Файлов пока нет</p>"),
             "settings": ("Настройки", settings),
-            "fw": ("Прошивка", firmware_box(dev, d)),
+            "fw": ("Прошивка", firmware_box(dev, d, await releases() if tab_wanted == "fw" else [])),
             "token": ("Токен", token)}
-    tab = request.query_params.get("tab", "")
-    tab = tab if tab in tabs else {"saved": "settings", "ota": "fw", "added": "token"}.get(
+    tab = tab_wanted if tab_wanted in tabs else {"saved": "settings", "ota": "fw", "added": "token"}.get(
         request.query_params.get("msg", ""), "state")
     nav = "".join(f'<a class="tab{" on" if k == tab else ""}" href="{BASE}/device/{esc(dev)}?tab={k}">{t}</a>'
                   for k, (t, _) in tabs.items())
@@ -429,37 +453,91 @@ async def device_save(request: Request):
         bitrate = int(form.get("bitrate", 128000))
     except ValueError:
         bitrate = 128000
+    route = form.get("route") if form.get("route") in devices.ROUTES else None
     devices.update(dev, record=bool(form.get("record")), format=fmt,
-                   bitrate=bitrate if bitrate in devices.BITRATES else 128000, schedule=schedule)
+                   bitrate=bitrate if bitrate in devices.BITRATES else 128000, schedule=schedule, route=route)
     return RedirectResponse(f"{BASE}/device/{dev}?msg=saved", 303)
 
 
-@guarded
-async def firmware_upload(request: Request):
-    """hbox.bin для обновления по воздуху (или отмена назначенного)."""
-    dev = request.path_params["dev"]
-    if dev not in devices.load():
-        return Response("Нет такого устройства", 404)
-    form = await request.form()
-    back = f'<p><a href="{BASE}/device/{esc(dev)}">назад</a></p>'
-    if form.get("cancel"):
-        devices.update(dev, ota=None)
-        return RedirectResponse(f"{BASE}/device/{dev}", 303)
-    up = form.get("firmware")
-    blob = await up.read() if hasattr(up, "read") else b""
+GITHUB_REPO = os.environ.get("HBOX_GITHUB_REPO", "nurlasan/hbox")
+_releases: tuple[float, list] = (0.0, [])
+
+
+def _get(url: str, limit: int) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "hbox-server", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("слишком большой ответ")
+    return data
+
+
+async def releases() -> list[dict]:
+    """Сборки прошивки с GitHub (релизы fw-<версия> с файлом hbox.bin), новые первыми; кэш 2 минуты."""
+    global _releases
+    if time.time() - _releases[0] < 120:
+        return _releases[1]
+    try:
+        raw = await asyncio.to_thread(_get, f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=8",
+                                      1 << 20)
+        out = []
+        for r in json.loads(raw):
+            asset = next((a for a in r.get("assets", []) if a["name"] == "hbox.bin"), None)
+            if asset and r["tag_name"].startswith("fw-"):
+                out.append({"version": r["tag_name"][3:], "title": r.get("name") or r["tag_name"],
+                            "date": r.get("published_at", ""), "url": asset["browser_download_url"],
+                            "zip": next((a["browser_download_url"] for a in r["assets"]
+                                         if a["name"].endswith(".zip")), None)})
+        _releases = (time.time(), out)
+    except (OSError, ValueError, KeyError) as e:
+        log.warning("github releases: %s", e)
+        return _releases[1]
+    return out
+
+
+def assign_firmware(dev: str, blob: bytes) -> str | None:
+    """Проверить hbox.bin и назначить устройству; текст ошибки или None."""
     core = _core()
     info = core.app_info(blob)
     if not info or info["project"] != "hbox":
-        return page("Ошибка", f"<p>Это не прошивка Hbox. Нужен файл hbox.bin из архива прошивки.</p>{back}")
+        return "Это не прошивка Hbox. Нужен файл hbox.bin из архива прошивки."
     if len(blob) > core.FW_MAX:
-        return page("Ошибка", f"<p>Прошивка больше слота ({core.FW_MAX // 1024} КБ).</p>{back}")
+        return f"Прошивка больше слота ({core.FW_MAX // 1024} КБ)."
     if not core.FW_VERSION.match(info["version"]):
-        return page("Ошибка", f"<p>Непонятная версия прошивки «{esc(info['version'])}».</p>{back}")
+        return f"Непонятная версия прошивки «{info['version']}»."
     crc = zlib.crc32(blob)
     name = f"{crc:08x}.bin"
     core.fw_dir().mkdir(parents=True, exist_ok=True)
     (core.fw_dir() / name).write_bytes(blob)
     devices.update(dev, ota={"name": name, "size": len(blob), "crc": crc, "version": info["version"]})
+    return None
+
+
+@guarded
+async def firmware_upload(request: Request):
+    """hbox.bin для обновления по воздуху: с GitHub (release), с компьютера или отмена назначенного."""
+    dev = request.path_params["dev"]
+    if dev not in devices.load():
+        return Response("Нет такого устройства", 404)
+    form = await request.form()
+    back = f'<p><a href="{BASE}/device/{esc(dev)}?tab=fw">назад</a></p>'
+    if form.get("cancel"):
+        devices.update(dev, ota=None)
+        return RedirectResponse(f"{BASE}/device/{dev}?tab=fw", 303)
+    if form.get("release"):
+        rel = next((r for r in await releases() if r["version"] == form.get("release")), None)
+        if not rel:
+            return page("Ошибка", f"<p>Нет такой сборки на GitHub.</p>{back}")
+        try:
+            blob = await asyncio.to_thread(_get, rel["url"], _core().FW_MAX)
+        except (OSError, ValueError) as e:
+            return page("Ошибка", f"<p>Не скачалась с GitHub: {esc(e)}</p>{back}")
+    else:
+        up = form.get("firmware")
+        blob = await up.read() if hasattr(up, "read") else b""
+    err = assign_firmware(dev, blob)
+    if err:
+        return page("Ошибка", f"<p>{esc(err)}</p>{back}")
     return RedirectResponse(f"{BASE}/device/{dev}?msg=ota", 303)
 
 

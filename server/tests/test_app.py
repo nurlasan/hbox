@@ -200,7 +200,7 @@ def test_cleanup_low_disk_removes_oldest(client, tmp_path, monkeypatch):
 
 from datetime import datetime  # noqa: E402
 
-from hbox_server import devices  # noqa: E402
+from hbox_server import admin, devices  # noqa: E402
 
 ADMIN = ("admin", "pw")
 SITE = {"Origin": "http://testserver"}
@@ -209,6 +209,7 @@ SITE = {"Origin": "http://testserver"}
 @pytest.fixture
 def site(client, monkeypatch):
     monkeypatch.setenv("HBOX_ADMIN_PASSWORD", "pw")
+    monkeypatch.setattr(admin, "_releases", (time.time(), []))  # без похода на GitHub
     return client
 
 
@@ -332,6 +333,28 @@ def fake_image(version: str, project: str = "hbox", size: int = 40_000) -> bytes
     blob[48:80] = version.encode().ljust(32, b"\0")
     blob[80:112] = project.encode().ljust(32, b"\0")
     return bytes(blob)
+
+
+def test_firmware_from_github(site, monkeypatch):
+    blob = fake_image("fed1234")
+    rel = {"version": "fed1234", "title": "fed1234: Clock fix", "date": "2026-11-12T09:00:00Z",
+           "url": "https://github.com/x/releases/download/fw-fed1234/hbox.bin", "zip": "https://x/z.zip"}
+    monkeypatch.setattr(admin, "_releases", (time.time(), [rel]))
+    monkeypatch.setattr(admin, "_get", lambda url, limit: blob if url == rel["url"] else b"")
+    page = site.get("/hbox/admin/device/cafe-1?tab=fw", auth=ADMIN).text
+    assert "fed1234: Clock fix" in page and 'name="release" value="fed1234"' in page and "zip для USB" in page
+    r = site.post("/hbox/admin/device/cafe-1/firmware", data={"release": "fed1234"}, headers=SITE, auth=ADMIN,
+                  follow_redirects=False)
+    assert r.status_code == 303 and devices.load()["cafe-1"]["ota"]["version"] == "fed1234"
+    bad = site.post("/hbox/admin/device/cafe-1/firmware", data={"release": "nope"}, headers=SITE, auth=ADMIN)
+    assert "Нет такой сборки" in bad.text
+
+
+def test_route_setting(site):
+    assert "route" not in site.get("/hbox/v1/config", headers=AUTH).json()
+    devices.update("cafe-1", route="cf")
+    assert site.get("/hbox/v1/config", headers=AUTH).json()["route"] == "cf"
+    assert 'value="cf" selected' in site.get("/hbox/admin/device/cafe-1?tab=settings", auth=ADMIN).text
 
 
 def test_ota_flow(site):

@@ -14,6 +14,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write # релиз fw-<версия>: сайт ставит hbox.bin отсюда, zip — для прошивки по USB
     steps:
       - uses: actions/checkout@v4
 
@@ -34,3 +36,17 @@ jobs:
             ota_data_initial.bin
             hbox.bin
           retention-days: 30
+
+      - name: Release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${GITHUB_SHA::7}"
+          mkdir pkg
+          cp bootloader.bin partition-table.bin ota_data_initial.bin hbox.bin pcclient/monitor.py pcclient/requirements.txt pkg/
+          for f in pcclient/*.bat pcclient/README.txt; do sed 's/\r*$/\r/' "$f" > "pkg/$(basename "$f")"; done
+          (cd pkg && zip -q "../hbox-firmware-$V.zip" *)
+          gh release create "fw-$V" hbox.bin "hbox-firmware-$V.zip" --target "$GITHUB_SHA" \
+            --title "$V: $(git log -1 --format=%s)" \
+            --notes "Обновление по воздуху: сайт → устройство → Прошивка → Установить. По USB: распаковать zip, esp_flash.bat."

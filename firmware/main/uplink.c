@@ -19,15 +19,30 @@
 #include "recorder.h"
 #include "store.h"
 
-#define SERVER "178.104.149.56"
-#define PORT 18443
 #define SOCK 0
-#define SSL_ID 1
 #define CA_NAME "hbox_ca.pem"
+#define CF_NAME "cf_roots.pem"
 #define CONFIG_EVERY_S (5 * 60)
 
 extern const char ca_pem_start[] asm("_binary_hbox_ca_pem_start");
 extern const char ca_pem_end[] asm("_binary_hbox_ca_pem_end");
+extern const char cf_pem_start[] asm("_binary_cf_roots_pem_start");
+
+/* Пути до сервера: напрямую (наш CA) и запасной через Cloudflare — обычный HTTPS на 443 с именем,
+ * его не режут операторы, которые режут TLS на нестандартный порт по IP (Kcell с 12.11.2026). */
+static const struct route {
+	const char *host;
+	int port;
+	int ssl_id;
+	const char *name;
+} routes[] = {
+	{"178.104.149.56", 18443, 1, "direct"},
+	{"hbox.fabtech.uz", 443, 2, "cf"},
+};
+#define ROUTE_FAILS 3 /* столько неудачных соединений подряд — пробуем другой путь */
+static int route, route_fails;
+static const char *fw_version(void);
+static char route_want[8] = ""; /* сервер может закрепить путь: "direct" / "cf" */
 
 static struct settings *cfg;
 static struct uplink_stats stats = {.state = "modem", .csq = -1};
@@ -106,17 +121,20 @@ static esp_err_t modem_setup(void)
 		modem_wait("+MIPCALL:", line, 30000);
 	}
 
-	/* TLS с проверкой сервера по нашему CA */
+	/* TLS с проверкой сервера: напрямую — по нашему CA, через Cloudflare — по публичным корням */
 	set_state("tls");
-	snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",0,%u", CA_NAME,
-		 (unsigned)strlen(ca_pem_start));
-	err = modem_at_data(cmd, ca_pem_start, strlen(ca_pem_start), 5000);
-	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"auth\",%d,1", SSL_ID);
-	err = err ?: modem_at(cmd, NULL, NULL, 2000);
-	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"cert\",%d,\"%s\"", SSL_ID, CA_NAME);
-	err = err ?: modem_at(cmd, NULL, NULL, 2000);
-	snprintf(cmd, sizeof(cmd), "AT+MIPCFG=\"ssl\",%d,1,%d", SOCK, SSL_ID);
-	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	err = ESP_OK;
+	for (int i = 0; i < 2; i++) {
+		const char *name = i ? CF_NAME : CA_NAME, *pem = i ? cf_pem_start : ca_pem_start;
+		int id = routes[i].ssl_id;
+
+		snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",0,%u", name, (unsigned)strlen(pem));
+		err = err ?: modem_at_data(cmd, pem, strlen(pem), 5000);
+		snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"auth\",%d,1", id);
+		err = err ?: modem_at(cmd, NULL, NULL, 2000);
+		snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"cert\",%d,\"%s\"", id, name);
+		err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	}
 	if (err) {
 		printf("HBOX UP tls setup failed\n");
 	}
@@ -141,13 +159,28 @@ static esp_err_t sock_connect(void)
 	}
 	sock_close();
 	modem_sock_reset();
+	for (int i = 0; i < 2; i++) {
+		if (route_want[0] && !strcmp(route_want, routes[i].name)) {
+			route = i;
+		}
+	}
+	const struct route *r = &routes[route];
+
+	snprintf(cmd, sizeof(cmd), "AT+MIPCFG=\"ssl\",%d,1,%d", SOCK, r->ssl_id);
+	modem_at(cmd, NULL, NULL, 2000);
 	/* режим буфера (,2): принятое ждёт в модеме, забираем AT+MIPRD — см. modem.c */
-	snprintf(cmd, sizeof(cmd), "AT+MIPOPEN=%d,\"TCP\",\"%s\",%d,60,2", SOCK, SERVER, PORT);
+	snprintf(cmd, sizeof(cmd), "AT+MIPOPEN=%d,\"TCP\",\"%s\",%d,60,2", SOCK, r->host, r->port);
 	if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+MIPOPEN:", line, 70000) != ESP_OK ||
 	    !strstr(line, ",0")) {
-		printf("HBOX UP connect failed %s\n", line);
+		printf("HBOX UP connect failed (%s) %s\n", r->name, line);
+		if (++route_fails >= ROUTE_FAILS && !route_want[0]) {
+			route = !route;
+			route_fails = 0;
+			printf("HBOX UP route -> %s\n", routes[route].name);
+		}
 		return ESP_FAIL;
 	}
+	route_fails = 0;
 	sock_open = true;
 	return ESP_OK;
 }
@@ -179,9 +212,9 @@ static int http_ex(const char *method, const char *path, struct store_file *f, u
 		return -1;
 	}
 	n = snprintf(head, sizeof(head),
-		     "%s %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"
+		     "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: hbox/%s\r\nAuthorization: Bearer %s\r\n"
 		     "Content-Length: %u\r\nContent-Type: application/octet-stream\r\n\r\n",
-		     method, path, SERVER, cfg->token, (unsigned)body_len);
+		     method, path, routes[route].host, fw_version(), cfg->token, (unsigned)body_len);
 	if (n >= (int)sizeof(head)) {
 		return -1;
 	}
@@ -585,6 +618,13 @@ static int fetch_config(void)
 	}
 	struct settings s = *cfg;
 
+	char want[sizeof(route_want)] = "";
+
+	json_str("route", want, sizeof(want));
+	if (strcmp(want, route_want)) {
+		strcpy(route_want, want);
+		printf("HBOX UP route set by server: %s\n", want[0] ? want : "auto");
+	}
 	if (json_str("channel", channel, sizeof(channel))) {
 		strcpy(s.channel, channel);
 	}

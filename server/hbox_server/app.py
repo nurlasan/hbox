@@ -271,6 +271,8 @@ async def config(request: Request):
     answer = {"record": record, "format": d["format"], "bitrate": d["bitrate"],
               "recheck": recheck, "channel": dev,
               "time": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+    if d.get("route") in devices.ROUTES:
+        answer["route"] = d["route"]
     ota = d.get("ota")
     if ota and ota["version"] not in (status.get("fw"), status.get("fw_bad")):
         answer.update(ota_name=ota["name"], ota_size=ota["size"], ota_crc=f"{ota['crc']:08x}",
