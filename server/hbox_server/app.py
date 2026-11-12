@@ -62,6 +62,7 @@ STATUS_FIELDS = ("rec", "files", "pending", "dropped", "overflows", "rec_errors"
 # прошивки для обновления по воздуху: DATA/firmware/<crc32>.bin
 FW_NAME = re.compile(r"^[0-9a-f]{8}\.bin$")
 FW_VERSION = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+OPERATOR = re.compile(r"^[A-Za-z0-9._-]{1,24}$")
 FW_MAX = 0x1E0000  # слот прошивки (firmware/partitions.csv)
 FW_BLOCK = 32768  # устройство проверяет каждый блок по своей CRC до записи во флеш
 
@@ -201,6 +202,7 @@ async def file_put(request: Request):
             size = offset
             ok = min(ok, offset)
         start_crc = crc
+        started, got = time.monotonic(), 0
         try:
             with open(part, "r+b" if part.exists() else "wb") as f:
                 f.truncate(size)
@@ -212,6 +214,7 @@ async def file_put(request: Request):
                         f.write(chunk)
                         crc = zlib.crc32(chunk, crc)
                         size += len(chunk)
+                        got += len(chunk)
                 except ClientDisconnect:
                     log.info("%s %s: disconnected at %d of %d", dev, name, size, total)
                 f.flush()
@@ -228,6 +231,7 @@ async def file_put(request: Request):
                 ok = size
         finally:
             save_state(state, size, crc, total, ok)
+            devices.traffic(dev, got, time.monotonic() - started)
 
         if size < total:
             return JSONResponse({"size": size, "done": False})
@@ -258,6 +262,8 @@ async def config(request: Request):
         v = request.query_params.get(k, "")
         if FW_VERSION.match(v):
             status[k] = v
+    if OPERATOR.match(request.query_params.get("op", "")):
+        status["op"] = request.query_params["op"].replace("_", " ")
     if status:
         devices.report(dev, status)
     d = devices.load()[dev]

@@ -95,6 +95,27 @@ def report(dev: str, status: dict):
         save(devs)
 
 
+def traffic(dev: str, nbytes: int, secs: float, now: float | None = None):
+    """Принятые от устройства данные: сегодня/месяц (по Алматы), всего и время передачи сегодня —
+    для средней скорости."""
+    t = datetime.fromtimestamp(now or time.time(), TZ)
+    day, month = t.strftime("%Y-%m-%d"), t.strftime("%Y-%m")
+    with _lock:
+        devs = load()
+        if dev not in devs:
+            return
+        tr = devs[dev].setdefault("traffic", {"total": 0})
+        if tr.get("day") != day:
+            tr.update(day=day, today=0, today_s=0.0)
+        if tr.get("month") != month:
+            tr.update(month=month, this_month=0)
+        tr["total"] += nbytes
+        tr["today"] += nbytes
+        tr["this_month"] += nbytes
+        tr["today_s"] = round(tr["today_s"] + secs, 1)
+        save(devs)
+
+
 def parse_range(s: str) -> tuple[int, int] | None:
     """"10:00-23:30" → минуты (600, 1410); конец меньше начала — через полночь. "" → None."""
     s = s.strip()

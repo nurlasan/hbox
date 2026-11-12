@@ -31,6 +31,9 @@ extern const char ca_pem_end[] asm("_binary_hbox_ca_pem_end");
 
 static struct settings *cfg;
 static struct uplink_stats stats = {.state = "modem", .csq = -1};
+static void url_safe(char *s);
+/* оператор сети (AT+COPS?), для сайта */
+static char op[25] = "";
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static bool sock_open;
 /* nginx закрывает простаивающее соединение через 120 с — заранее открываем новое */
@@ -81,6 +84,19 @@ static esp_err_t modem_setup(void)
 	line[0] = '\0';
 	if (modem_at("AT+CSQ", "+CSQ:", line, 1000) == ESP_OK) {
 		stats.csq = atoi(line + 6);
+	}
+	/* +COPS: 0,0,"KCELL",7 — имя оператора буквами */
+	line[0] = '\0';
+	modem_at("AT+COPS=3,0", NULL, NULL, 1000);
+	if (modem_at("AT+COPS?", "+COPS:", line, 2000) == ESP_OK) {
+		char *a = strchr(line, '"'), *b = a ? strchr(a + 1, '"') : NULL;
+
+		if (b) {
+			*b = '\0';
+			strlcpy(op, a + 1, sizeof(op));
+			url_safe(op);
+			printf("HBOX UP operator %s\n", op);
+		}
 	}
 	/* мобильный интернет: обычно включается сам */
 	line[0] = '\0';
@@ -533,7 +549,7 @@ fail:
 /* Настройки; заодно состояние устройства для сайта. Возвращает, через сколько секунд спросить снова. */
 static int fetch_config(void)
 {
-	char channel[sizeof(cfg->channel)], format[8], t[32], path[400];
+	char channel[sizeof(cfg->channel)], format[8], t[32], path[512];
 	struct recorder_stats rec;
 	uint32_t sd_free, sd_total, pending_mb;
 	int code;
@@ -543,13 +559,13 @@ static int fetch_config(void)
 	snprintf(path, sizeof(path),
 		 "/hbox/v1/config?rec=%d&files=%lu&pending=%lu&dropped=%lu&overflows=%lu&rec_errors=%lu"
 		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld&reset=%d"
-		 "&sd_free=%lu&sd_total=%lu&pending_mb=%lu&fw=%s&fw_bad=%s",
+		 "&sd_free=%lu&sd_total=%lu&pending_mb=%lu&fw=%s&fw_bad=%s&op=%s",
 		 rec.recording, (unsigned long)rec.files, (unsigned long)store_pending(),
 		 (unsigned long)store_dropped(), (unsigned long)rec.overflows, (unsigned long)rec.errors,
 		 (unsigned long)rec.cpu10 / 10, stats.csq, (unsigned long)stats.errors,
 		 (unsigned long)stats.sent_files, (unsigned long)stats.kbps10 / 10,
 		 esp_timer_get_time() / 60000000, (int)esp_reset_reason(), (unsigned long)sd_free,
-		 (unsigned long)sd_total, (unsigned long)pending_mb, fw_version(), fw_bad);
+		 (unsigned long)sd_total, (unsigned long)pending_mb, fw_version(), fw_bad, op);
 	code = http("GET", path, NULL, 0, 0);
 
 	if (code != 200) {

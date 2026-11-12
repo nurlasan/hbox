@@ -30,7 +30,7 @@ STATUS_TITLES = {
     "cpu": "кодирование, %", "sent": "отправлено файлов", "kbps": "скорость, КБ/с",
     "files": "записано файлов", "uptime": "работает, мин", "reset": "причина перезапуска",
     "pending_mb": "ждут отправки, МБ", "sd_free": "SD свободно", "sd_total": "SD всего",
-    "fw": "прошивка", "fw_bad": "не запустилась прошивка",
+    "fw": "прошивка", "fw_bad": "не запустилась прошивка", "op": "оператор",
 }
 QUEUE_BAD_H = 6     # отправка отстаёт больше чем на столько часов записи
 SD_BAD_DAYS = 2     # места на карте меньше чем на столько дней записи
@@ -151,7 +151,8 @@ color:var(--rec);border:1.5px solid var(--rec);border-radius:8px;padding:2px 9px
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1);box-shadow:0 0 0 0 rgba(239,68,68,.55)}
 50%{opacity:.35;transform:scale(.8);box-shadow:0 0 0 6px rgba(239,68,68,0)}}
 @media (prefers-reduced-motion:reduce){.rec i{animation:none}}
-.sd{display:flex;align-items:center;gap:10px}
+.sd,.net{display:flex;align-items:center;gap:10px}
+.net svg{width:22px;height:22px;flex:none;fill:none;stroke:var(--accent,#2f7de1);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .sd svg{width:22px;height:26px;flex:none;fill:none;stroke:var(--muted);stroke-width:1.6}
 .bar{flex:1;height:8px;background:var(--chip);border-radius:6px;overflow:hidden;min-width:60px}
 .bar b{display:block;height:100%;background:var(--accent);border-radius:6px}
@@ -248,18 +249,38 @@ def signal_bars(csq) -> int:
     return 1 if csq < 10 else 2 if csq < 15 else 3 if csq < 20 else 4
 
 
-def signal_icon(csq) -> str:
+def signal_icon(csq, op: str | None = None) -> str:
     n = signal_bars(csq)
     on = ' class="on"'
     bars = "".join(f'<rect x="{i * 5}" y="{12 - 3 * i}" width="3.5" height="{4 + 3 * i}" rx="1"'
                    f'{on if i < n else ""}/>' for i in range(4))
     return (f'<span class="sig" title="сигнал CSQ {esc(csq)}"><svg width="22" height="18" '
-            f'viewBox="0 0 19 16">{bars}</svg><b>4G</b></span>')
+            f'viewBox="0 0 19 16">{bars}</svg><b>{esc(op) + " " if op else ""}4G</b></span>')
+
+
+def size_text(n: int) -> str:
+    return f"{n / 1e9:.2f} ГБ" if n >= 1e9 else f"{n / 1e6:.0f} МБ"
+
+
+def traffic_line(d: dict, now: float) -> str:
+    """Значок передачи, средняя скорость за сегодня и принятый трафик (сегодня, месяц, всего)."""
+    tr = d.get("traffic")
+    if not tr:
+        return f'<div class="net">{ICON_NET}<span class="small">передачи ещё не было</span></div>'
+    t = datetime.fromtimestamp(now, devices.TZ)
+    today = tr.get("today", 0) if tr.get("day") == t.strftime("%Y-%m-%d") else 0
+    month = tr.get("this_month", 0) if tr.get("month") == t.strftime("%Y-%m") else 0
+    secs = tr.get("today_s", 0) if today else 0
+    speed = f"{today / secs / 1024:.0f} КБ/с" if secs >= 1 else "–"
+    return (f'<div class="net">{ICON_NET}<div><b>{speed}</b> <span class="small">в среднем за сегодня</span>'
+            f'<div class="small">трафик: сегодня {size_text(today)} · месяц {size_text(month)} · '
+            f'всего {size_text(tr.get("total", 0))}</div></div></div>')
 
 
 ICON_FILE = ('<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>'
              '<path d="M14 3v5h5"/></svg>')
 ICON_WAVE = '<svg viewBox="0 0 24 24"><path d="M3 12h3l3-7 4 14 3-9 2 2h3"/></svg>'
+ICON_NET = '<svg viewBox="0 0 24 24"><path d="M7 20V5M3 9l4-4 4 4M17 4v15M13 15l4 4 4-4"/></svg>'
 ICON_SD = '<svg viewBox="0 0 22 26"><path d="M7 1h13v24H2V6z"/><path d="M8 5v4M11 5v4M14 5v4M17 5v4"/></svg>'
 
 
@@ -295,13 +316,13 @@ def device_card(dev: str, d: dict, now: float) -> str:
         f'<a class="name" href="{BASE}/device/{esc(dev)}">{esc(dev)}</a>'
         f'<span class="dot{" on" if online else ""}"></span>'
         f'<span class="small">{"на связи" if online else "нет связи"} · {local(seen) if seen else "никогда"}</span>'
-        f"</div>{signal_icon(st.get('csq'))}</div>"
+        f"</div>{signal_icon(st.get('csq'), st.get('op'))}</div>"
         f'<div class="row">{rec}<span class="chip">{ICON_FILE}{esc(d["format"]).upper()}</span>'
         f'<span class="chip">{ICON_WAVE}{d["bitrate"] // 1000} kbps</span>'
         f'<span class="small">{sched}</span></div>'
-        f"{sd}"
-        f'<div class="small">{st.get("pending", "–")} ждут · {len(today)} за день · '
-        f'{st.get("kbps", "–")} КБ/с{"".join("<br>" + esc(x) for x in lines)}</div>'
+        f"{sd}{traffic_line(d, now)}"
+        f'<div class="small">{st.get("pending", "–")} ждут · {len(today)} за день'
+        f'{"".join("<br>" + esc(x) for x in lines)}</div>'
         + (f'<div class="problems">{"<br>".join(map(esc, problems))}</div>' if problems else "")
         + f"{last}</div>")
 

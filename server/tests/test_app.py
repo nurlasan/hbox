@@ -297,6 +297,24 @@ def test_site_shows_queue_and_sd(site):
     assert "нет SD-карты" in site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text
 
 
+def test_traffic_and_operator(site):
+    assert "передачи ещё не было" in site.get("/hbox/admin/", auth=ADMIN).text
+    data = os.urandom(3_000_000)
+    put(site, data, 0, len(data), zlib.crc32(data))
+    site.get("/hbox/v1/config?csq=20&op=KCELL&fw=abc", headers=AUTH)
+    page = site.get("/hbox/admin/", auth=ADMIN).text
+    assert "KCELL 4G" in page and "в среднем за сегодня" in page
+    assert "сегодня 3 МБ · месяц 3 МБ · всего 3 МБ" in page
+    tr = devices.load()["cafe-1"]["traffic"]
+    assert tr["total"] == tr["today"] == len(data)
+    # новые сутки: сегодня с нуля, всего копится
+    devices.traffic("cafe-1", 1000, 1.0, now=time.time() + 86400 * 40)
+    tr = devices.load()["cafe-1"]["traffic"]
+    assert tr["today"] == tr["this_month"] == 1000 and tr["total"] == len(data) + 1000
+    site.get("/hbox/v1/config?pending=1&op=bad%20op%22", headers=AUTH)
+    assert "op" not in devices.load()["cafe-1"]["status"]
+
+
 def fake_image(version: str, project: str = "hbox", size: int = 40_000) -> bytes:
     """Похоже на образ ESP-IDF: 0xE9, esp_app_desc_t с версией и проектом."""
     blob = bytearray(os.urandom(size))
