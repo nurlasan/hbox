@@ -146,8 +146,9 @@ typedef bool (*http_sink)(const uint8_t *data, size_t len, void *ctx);
  * Ответ — в resp (тело), а если задан sink — тело любой длины потоком в sink.
  * Возвращает код HTTP или -1 при обрыве (принятое до обрыва sink уже получил).
  */
-/* esp_timer отправки последнего запроса и прихода заголовков ответа — для часов */
-static int64_t req_us, ans_us;
+/* esp_timer отправки последнего запроса и прихода заголовков ответа — для часов;
+ * contact_us — последний ответ сервера — для перезапуска модема */
+static int64_t req_us, ans_us, contact_us;
 
 static int http_ex(const char *method, const char *path, struct store_file *f, uint32_t body_off,
 		   uint32_t body_len, http_sink sink, void *ctx)
@@ -200,6 +201,7 @@ static int http_ex(const char *method, const char *path, struct store_file *f, u
 	if (sscanf(resp, "HTTP/1.%*d %d", &code) != 1) {
 		goto broken;
 	}
+	contact_us = ans_us;
 	char *cl = strcasestr(resp, "\r\nContent-Length:");
 
 	body += 4;
@@ -751,10 +753,15 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 	return true;
 }
 
+/* Сервер молчит столько — перезапускаем модем: зависший TLS (+MIPOPEN: 0,753) он сам не отпускает,
+ * а перезагрузка ESP модем не трогает. */
+#define MODEM_REBOOT_US (10LL * 60 * 1000000)
+
 static void task(void *arg)
 {
 	int failures = 0;
 	bool ready = false;
+	int64_t reboot_us = 0;
 
 	for (;;) {
 		if (!cfg->token[0]) {
@@ -764,6 +771,15 @@ static void task(void *arg)
 			continue;
 		}
 		if (!ready || failures >= 5) {
+			int64_t now = esp_timer_get_time();
+
+			if (now - contact_us >= MODEM_REBOOT_US && now - reboot_us >= MODEM_REBOOT_US) {
+				printf("HBOX UP no server for %lld min: modem reboot\n",
+				       (long long)((now - contact_us) / 60000000));
+				modem_at("AT+CFUN=1,1", NULL, NULL, 5000);
+				vTaskDelay(pdMS_TO_TICKS(15000));
+				reboot_us = now;
+			}
 			sock_open = false;
 			ready = modem_setup() == ESP_OK;
 			failures = 0;
