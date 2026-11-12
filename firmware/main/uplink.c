@@ -42,6 +42,7 @@ static const struct route {
 };
 #define ROUTE_FAILS 3 /* столько неудачных соединений подряд — пробуем другой путь */
 static int route, route_fails;
+static bool cf_ready; /* сертификаты Cloudflare в модеме — без них запасной путь не пробуем */
 static const char *fw_version(void);
 static char route_want[8] = ""; /* сервер может закрепить путь: "direct" / "cf" */
 
@@ -73,9 +74,43 @@ static void set_state(const char *s)
 
 /* --- модем и TLS --- */
 
+/* Сертификат кусками по 1 КБ (AT+MSSLCERTWR с остатком): 6 КБ одним куском модем без
+ * управления потоком на UART не принимает. */
+static esp_err_t cert_write(const char *name, const char *pem)
+{
+	char cmd[96];
+	size_t len = strlen(pem);
+
+	for (size_t off = 0; off < len;) {
+		size_t n = len - off < 1024 ? len - off : 1024;
+
+		snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",%u,%u", name, (unsigned)(len - off - n), (unsigned)n);
+		if (modem_at_data(cmd, pem + off, n, 5000) != ESP_OK) {
+			printf("HBOX UP cert %s failed at %u of %u\n", name, (unsigned)off, (unsigned)len);
+			return ESP_FAIL;
+		}
+		off += n;
+	}
+	return ESP_OK;
+}
+
+static esp_err_t tls_setup(int i)
+{
+	char cmd[96];
+	const char *name = i ? CF_NAME : CA_NAME, *pem = i ? cf_pem_start : ca_pem_start;
+	int id = routes[i].ssl_id;
+	esp_err_t err = cert_write(name, pem);
+
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"auth\",%d,1", id);
+	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"cert\",%d,\"%s\"", id, name);
+	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	return err;
+}
+
 static esp_err_t modem_setup(void)
 {
-	char line[MODEM_LINE_MAX], cmd[96];
+	char line[MODEM_LINE_MAX];
 	esp_err_t err;
 
 	set_state("modem");
@@ -122,24 +157,21 @@ static esp_err_t modem_setup(void)
 		modem_wait("+MIPCALL:", line, 30000);
 	}
 
-	/* TLS с проверкой сервера: напрямую — по нашему CA, через Cloudflare — по публичным корням */
+	/* TLS с проверкой сервера: напрямую — по нашему CA, через Cloudflare — по публичным корням.
+	 * Без запасного пути работать можно: его сбой не мешает прямому. */
 	set_state("tls");
-	err = ESP_OK;
 	for (int i = 0; i < 2; i++) {
-		const char *name = i ? CF_NAME : CA_NAME, *pem = i ? cf_pem_start : ca_pem_start;
-		int id = routes[i].ssl_id;
-
-		snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",0,%u", name, (unsigned)strlen(pem));
-		err = err ?: modem_at_data(cmd, pem, strlen(pem), 5000);
-		snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"auth\",%d,1", id);
-		err = err ?: modem_at(cmd, NULL, NULL, 2000);
-		snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"cert\",%d,\"%s\"", id, name);
-		err = err ?: modem_at(cmd, NULL, NULL, 2000);
+		if (tls_setup(i) != ESP_OK) {
+			printf("HBOX UP tls setup failed (%s)\n", routes[i].name);
+			if (i == 0) {
+				return ESP_FAIL;
+			}
+			cf_ready = false;
+		} else if (i == 1) {
+			cf_ready = true;
+		}
 	}
-	if (err) {
-		printf("HBOX UP tls setup failed\n");
-	}
-	return err;
+	return ESP_OK;
 }
 
 static void sock_close(void)
@@ -174,7 +206,7 @@ static esp_err_t sock_connect(void)
 	if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+MIPOPEN:", line, 70000) != ESP_OK ||
 	    !strstr(line, ",0")) {
 		printf("HBOX UP connect failed (%s) %s\n", r->name, line);
-		if (++route_fails >= ROUTE_FAILS && !route_want[0]) {
+		if (++route_fails >= ROUTE_FAILS && !route_want[0] && (cf_ready || route)) {
 			route = !route;
 			route_fails = 0;
 			printf("HBOX UP route -> %s\n", routes[route].name);
@@ -815,6 +847,15 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 /* Сервер молчит столько — перезапускаем модем: зависший TLS (+MIPOPEN: 0,753) он сам не отпускает,
  * а перезагрузка ESP модем не трогает. */
 #define MODEM_REBOOT_US (10LL * 60 * 1000000)
+#define FW_PROBATION_US (15LL * 60 * 1000000)
+
+static bool fw_pending(void)
+{
+	esp_ota_img_states_t st;
+
+	return esp_ota_get_state_partition(esp_ota_get_running_partition(), &st) == ESP_OK &&
+	       st == ESP_OTA_IMG_PENDING_VERIFY;
+}
 
 static void task(void *arg)
 {
@@ -831,6 +872,12 @@ static void task(void *arg)
 		}
 		if (!ready || failures >= 5) {
 			int64_t now = esp_timer_get_time();
+
+			/* новая прошивка не связалась с сервером за 15 мин — перезагрузка, загрузчик вернёт прежнюю */
+			if (!contact_us && now >= FW_PROBATION_US && fw_pending()) {
+				printf("HBOX UP new firmware %s: no server for 15 min, rollback\n", fw_version());
+				esp_restart();
+			}
 
 			if (now - contact_us >= MODEM_REBOOT_US && now - reboot_us >= MODEM_REBOOT_US) {
 				printf("HBOX UP no server for %lld min: modem reboot\n",
