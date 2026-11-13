@@ -21,7 +21,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
-from . import devices
+from . import devices, hours
 
 log = logging.getLogger("hbox")
 
@@ -186,6 +186,18 @@ color:var(--rec);border:1.5px solid var(--rec);border-radius:8px;padding:2px 9px
 .problems{background:color-mix(in srgb,var(--bad) 10%,transparent);color:var(--bad);border-radius:10px;
 padding:8px 10px;font-size:13px}
 .last{font-size:13px;overflow-wrap:anywhere}
+.k-sent{background:var(--ok)} .k-sending,.k-queue{background:var(--warn)} .k-gap{background:var(--bad)}
+.k-off{background:var(--off)} .k-unknown{background:repeating-linear-gradient(45deg,var(--off) 0 3px,transparent 3px 6px)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+.chart{display:grid;grid-template-columns:repeat(24,1fr);gap:3px;align-items:end;height:110px;margin:8px 0 2px}
+.chart a{display:flex;flex-direction:column-reverse;height:100%;background:var(--chip);border-radius:4px;overflow:hidden}
+.chart a:hover{outline:2px solid var(--accent)}
+.chart-x{display:grid;grid-template-columns:repeat(24,1fr);gap:3px;font-size:11px;color:var(--muted);text-align:center}
+.strip{position:relative;height:14px;background:var(--chip);border-radius:4px;min-width:160px;overflow:hidden}
+.strip i{position:absolute;top:0;bottom:0}
+table.hours td{vertical-align:middle;white-space:nowrap} table.hours td.why{white-space:normal}
+.scroll{overflow-x:auto}
 """
 
 
@@ -258,6 +270,70 @@ def player(dev: str, day: str, name: str) -> str:
     url = f"{BASE}/file/{esc(dev)}/{esc(day)}/{esc(name)}"
     return (f'<audio controls preload="none" src="{url}"></audio> '
             f'<a href="{url}" download>{esc(name)}</a>')
+
+
+HOUR_KINDS = {"sent": "передано", "sending": "передаётся", "queue": "на карте, в очереди",
+              "gap": "нет записи", "off": "вне расписания", "unknown": "неизвестно (нет связи)"}
+
+
+def hours_box(dev: str, d: dict, now: float) -> str:
+    """Вкладка «По часам»: график за день и таблица по каждому часу (Алматы)."""
+    items = hours.pieces(_core().DATA, dev, d.get("bitrate") or 128000)
+    rows = hours.hours(d, items, now)
+    if not rows:
+        return "<p class=muted>Файлов пока нет</p>"
+    legend = "".join(f'<span><i class="k-{k}"></i>{t}</span>' for k, t in HOUR_KINDS.items())
+    out = [f'<div class="legend">{legend}</div>']
+    for day, rs in hours.by_day(rows):
+        rec = sum(r["rec"] for r in rs)
+        gap = sum(r["gap"] for r in rs)
+        mb = sum(r["mb"] for r in rs)
+        title = datetime.strptime(day, "%Y-%m-%d").strftime("%d.%m.%Y")
+        cols = {datetime.fromtimestamp(r["start"], devices.TZ).hour: r for r in rs}
+        bars, xs = [], []
+        for h in range(24):
+            r = cols.get(h)
+            xs.append(f"<span>{h}</span>" if h % 3 == 0 else "<span></span>")
+            if not r:
+                bars.append('<a style="visibility:hidden"></a>')
+                continue
+            parts = {}
+            for a, b, k, _ in r["segs"]:
+                parts[k] = parts.get(k, 0) + b - a
+            fill = "".join(f'<i class="k-{k}" style="height:{v / 60 * 100:.1f}%"></i>'
+                           for k, v in sorted(parts.items(), key=lambda x: list(HOUR_KINDS).index(x[0])))
+            tip = f'{h:02d}:00 — записано {hours.fmt_min(r["rec"])}, {r["mb"]:.0f} МБ, {r["state"][1]}'
+            bars.append(f'<a href="#h-{day}-{h}" title="{esc(tip)}">{fill}</a>')
+        trs = []
+        for r in reversed(rs):
+            h0 = datetime.fromtimestamp(r["start"], devices.TZ)
+            strip = "".join(f'<i class="k-{k}" style="left:{a / 60 * 100:.2f}%;width:{(b - a) / 60 * 100:.2f}%" '
+                            f'title="{h0.hour:02d}:{int(a):02d}–{h0.hour:02d}:{min(int(b), 59):02d} '
+                            f'{esc(n or HOUR_KINDS[k])}"></i>' for a, b, k, n in r["segs"])
+            kind, text = r["state"]
+            cls = {"sent": "ok", "gap": "bad", "partial": "bad"}.get(kind, "")
+            why = "; ".join(r["notes"])
+            if r["gap"] >= 60:
+                why = f'пропуск {hours.fmt_min(r["gap"])}' + (f": {why}" if why else "")
+            trs.append(f'<tr id="h-{day}-{h0.hour}"><td>{h0:%H}:00–{(h0.hour + 1) % 24:02d}:00</td>'
+                       f'<td style="width:40%"><div class="strip">{strip}</div></td>'
+                       f'<td>{hours.fmt_min(r["rec"])}</td><td>{r["mb"]:.1f} МБ</td>'
+                       f'<td class="{cls}">{esc(text)}</td><td class="why small">{esc(why)}</td></tr>')
+        out.append(
+            f'<div class="box"><h2 style="margin-top:0">{title} · записано {hours.fmt_min(rec)}'
+            f' · {mb:.0f} МБ' + (f' · <span class="bad">пропуски {hours.fmt_min(gap)}</span>' if gap >= 60 else "")
+            + f'</h2><div class="chart">{"".join(bars)}</div><div class="chart-x">{"".join(xs)}</div>'
+            f'<div class="scroll"><table class="hours"><tr><th>Час</th><th>Минуты часа</th><th>Записано</th>'
+            f'<th>Объём</th><th>Файл</th><th>Причина</th></tr>{"".join(trs)}</table></div></div>')
+    boots = d.get("boots", [])[-10:]
+    if boots:
+        out.append('<div class="box"><h2 style="margin-top:0">Запуски устройства</h2>' + "".join(
+            f'<div>{local(b["t"])} — {esc(RESETS.get(b.get("reset"), "?"))}</div>' for b in reversed(boots))
+            + "</div>")
+    out.append('<p class="muted">Время — Алматы. Часы, полученные сервером, — зелёные; после последнего '
+               "полученного файла запись ещё на карте устройства. Пропуск между файлами — записи нет: "
+               "питание, перезапуск или файл испорчен.</p>")
+    return "".join(out)
 
 
 def schedule_text(d: dict) -> str:
@@ -418,6 +494,7 @@ async def device(request: Request):
              f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>')
     tab_wanted = request.query_params.get("tab", "") or {"ota": "fw"}.get(request.query_params.get("msg", ""), "")
     tabs = {"state": ("Состояние", state),
+            "hours": ("По часам", hours_box(dev, d, time.time()) if tab_wanted == "hours" else ""),
             "files": ("Записи", files or "<p class=muted>Файлов пока нет</p>"),
             "settings": ("Настройки", settings),
             "fw": ("Прошивка", firmware_box(dev, d, await releases() if tab_wanted == "fw" else [])),

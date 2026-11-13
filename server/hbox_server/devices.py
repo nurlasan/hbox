@@ -22,6 +22,8 @@ BITRATES = (64000, 96000, 128000, 160000)
 ROUTES = {"direct": "напрямую (18443)", "cf": "через Cloudflare (443)"}
 # устройство всё равно спрашивает настройки не реже раза в 5 минут
 RECHECK_MAX = 300
+# запуски устройства (по uptime) — для отчёта по часам: где пропуск из-за питания
+BOOTS_KEPT = 200
 
 DEFAULT = {
     "record": True,
@@ -90,10 +92,15 @@ def update(dev: str, **fields):
 
 def report(dev: str, status: dict):
     """Состояние, которое устройство прислало с запросом настроек."""
+    from . import hours
     with _lock:
         devs = load()
-        devs[dev]["seen"] = int(time.time())
-        devs[dev]["status"] = status
+        d = devs[dev]
+        boot = hours.boot_seen(d, status, time.time())
+        if boot:
+            d["boots"] = (d.get("boots", []) + [boot])[-BOOTS_KEPT:]
+        d["seen"] = int(time.time())
+        d["status"] = status
         save(devs)
 
 

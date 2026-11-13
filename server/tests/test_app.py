@@ -415,3 +415,42 @@ def test_signal_icon():
     assert admin.signal_bars(26) == 4 and admin.signal_bars(12) == 2 and admin.signal_bars(99) == 0
     svg = admin.signal_icon(12)
     assert svg.count("<rect") == 4 and svg.count("/>") == 4 and svg.count('class="on"') == 2
+
+
+def mp3_file(path, seconds):
+    """CBR MP3 128 кбит/с: заголовок кадра MPEG-1 Layer III и нужный размер."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfb\x90\x64" + b"\0" * (int(seconds * 16000) - 4))
+
+
+def test_hour_report(site, tmp_path, monkeypatch):
+    from hbox_server import hours
+    day = tmp_path / "cafe-1" / "2026-11-12"
+    # UTC: 05:00 целиком, 06:00 нет (питание), 07:20–08:00, 08:00 — передаётся
+    mp3_file(day / "cafe-1_20261112_050000.mp3", 3600)
+    mp3_file(day / "cafe-1_20261112_072000.mp3", 2400)
+    part = tmp_path / ".partial" / "cafe-1"
+    part.mkdir(parents=True)
+    (part / "cafe-1_20261112_080000.mp3.part").write_bytes(b"\0" * 16000 * 900)
+    (part / "cafe-1_20261112_080000.mp3.json").write_text('{"total": %d}' % (16000 * 3600))
+    now = at("2026-11-12 13:30")  # 08:30 UTC
+    devices.update("cafe-1", seen=int(now), status={"rec": 1, "uptime": 70, "reset": 1},
+                   boots=[{"t": int(at("2026-11-12 12:20")), "reset": 1}])
+    d = devices.load()["cafe-1"]
+    rows = {datetime.fromtimestamp(r["start"], devices.TZ).hour: r
+            for r in hours.hours(d, hours.pieces(tmp_path, "cafe-1", 128000), now)}
+    assert rows[10]["state"] == ("sent", "передан") and round(rows[10]["rec"]) == 3600
+    assert round(rows[10]["mb"], 1) == 57.6
+    assert rows[11]["state"][0] == "gap" and rows[11]["notes"] == ["не было питания"]
+    assert rows[12]["state"][0] == "partial" and round(rows[12]["rec"]) == 2400
+    assert rows[13]["state"] == ("sending", "передаётся 25%")
+    monkeypatch.setattr(time, "time", lambda: now)
+    page = site.get("/hbox/admin/device/cafe-1?tab=hours", auth=ADMIN).text
+    assert "передан частично" in page and "не было питания" in page and "40 мин" in page
+
+
+def test_boots_recorded(client):
+    client.get("/hbox/v1/config?rec=1&uptime=100&reset=1", headers=AUTH)
+    client.get("/hbox/v1/config?rec=1&uptime=101&reset=1", headers=AUTH)
+    client.get("/hbox/v1/config?rec=1&uptime=0&reset=4", headers=AUTH)
+    assert [b["reset"] for b in devices.load()["cafe-1"]["boots"]] == [1, 4]
