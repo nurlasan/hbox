@@ -186,7 +186,8 @@ color:var(--rec);border:1.5px solid var(--rec);border-radius:8px;padding:2px 9px
 .problems{background:color-mix(in srgb,var(--bad) 10%,transparent);color:var(--bad);border-radius:10px;
 padding:8px 10px;font-size:13px}
 .last{font-size:13px;overflow-wrap:anywhere}
-.k-sent{background:var(--ok)} .k-sending,.k-queue{background:var(--warn)} .k-gap{background:var(--bad)}
+.k-sent{background:var(--ok)} .k-queue{background:var(--warn)}
+.k-sending{background:repeating-linear-gradient(45deg,var(--ok) 0 4px,color-mix(in srgb,var(--ok) 35%,transparent) 4px 8px)} .k-gap{background:var(--bad)}
 .k-off{background:var(--off)} .k-unknown{background:repeating-linear-gradient(45deg,var(--off) 0 3px,transparent 3px 6px)}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:5px}
