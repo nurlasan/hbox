@@ -214,9 +214,10 @@ def hours(d: dict, items: list[dict], now: float) -> list[dict]:
                 files.append(it)
         # в очереди — файла ещё нет, объём по битрейту
         mb += queue * (d.get("bitrate") or 128000) / 8 / 1e6
-        if sending:
+        # обрывки меньше минуты на стыке файлов — не в счёт
+        if sending >= 60:
             state = ("sending", f"передаётся {max(i.get('pct', 0) for i in files if i['kind'] == 'sending')}%")
-        elif queue:
+        elif queue >= 60:
             state = ("queue", "в очереди")
         elif sent < 60 and gap:
             state = ("gap", "нет файла")
