@@ -12,6 +12,7 @@
  * Старые имена <секунды Unix>.<ext> при включении переименовываются в новые. После перезагрузки .part от mp3
  * отправляется как есть (кадры MP3 независимы), m4a без moov — пока выбрасывается (hbox-5nq).
  */
+#include "board.h"
 #include "store.h"
 
 #include <ctype.h>
@@ -38,10 +39,10 @@
 #include "diskio_sdmmc.h"
 #include "ff.h"
 
-#define PIN_CS 10
-#define PIN_SCK 11
-#define PIN_MOSI 8
-#define PIN_MISO 9
+#define PIN_CS SD_PIN_CS
+#define PIN_SCK SD_PIN_SCK
+#define PIN_MOSI SD_PIN_MOSI
+#define PIN_MISO SD_PIN_MISO
 
 #define MOUNT "/sd"
 #define SD_DIR MOUNT "/hbox"

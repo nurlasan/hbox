@@ -11,7 +11,7 @@ Hbox — утилиты для Windows
    микрофон INMP441: WS=4, SCK=5, SD=6, L/R -> GND, VDD -> 3V3;
    модем ML307R: пины 12 и 13 (TX/RX можно перепутать - плата найдёт сама), GND общий,
    питание модема 5 В до 2 А;
-   microSD YS-41 (позже): CS=10, SCK=7, MOSI=8, MISO=9, VCC -> 5V.
+   microSD YS-41: CS=8, SCK=9, MOSI=10, MISO=11, VCC -> 5V (выводы — firmware/main/board.h).
 
 4. Токен устройства (один раз, хранится в плате): token.bat ТОКЕН
    Токен выдаёт сервер (файл .env, HBOX_DEVICES).
