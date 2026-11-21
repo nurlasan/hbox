@@ -8,7 +8,7 @@ Hbox — утилиты для Windows
    (порт находится сам; иначе esp_flash.bat COM7).
 
 3. Подключение (SuperMini):
-   микрофон INMP441: WS=4, SCK=5, SD=6, L/R -> GND, VDD -> 3V3;
+   микрофон INMP441: WS=6, SCK=5, SD=4, L/R -> GND, VDD -> 3V3;
    модем ML307R: пины 12 и 13 (TX/RX можно перепутать - плата найдёт сама), GND общий,
    питание модема 5 В до 2 А;
    microSD YS-41: CS=8, SCK=9, MOSI=10, MISO=11, VCC -> 5V (выводы — firmware/main/board.h).
