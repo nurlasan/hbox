@@ -147,8 +147,10 @@ static esp_err_t read_line(char *line, int64_t until)
 				continue;
 			}
 			line[n] = '\0';
+			/* +CCHCLOSE: — ответ на наше закрытие прежнего соединения, приходит с опозданием (уже
+			 * после открытия нового) — не обрыв */
 			if (starts(line, "+MIPURC: \"disconn\"") || starts(line, "+CCH_PEER_CLOSED:") ||
-			    starts(line, "+CCHCLOSE:")) {
+			    starts(line, "+CCH_RECV_CLOSED:")) {
 				sock_closed = true;
 			} else if (starts(line, "+MIPURC: \"rtcp\"")) {
 				note_rtcp(line);
