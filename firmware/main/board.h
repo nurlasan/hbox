@@ -6,8 +6,8 @@
 #define MIC_PIN_SD 4
 
 /* ML307R / A7670C на UART1; провода TX/RX прошивка находит сама (modem.c) */
-#define MODEM_PIN_TX 12
-#define MODEM_PIN_RX 13
+#define MODEM_PIN_TX 3
+#define MODEM_PIN_RX 2
 
 /* microSD по SPI (раскладка корпуса 2026-11) */
 #define SD_PIN_CS 8
