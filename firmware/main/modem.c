@@ -47,6 +47,7 @@ static volatile bool sock_closed;
 /* сколько байт ждёт в буфере модема (по +MIPURC "rtcp" и +MIPRD); у A7670C — 1, если что-то есть */
 static volatile size_t sock_unread;
 #define READ_CHUNK 4096
+#define SIM_CHUNK 1024
 
 static void sock_put(const uint8_t *p, size_t n)
 {
@@ -565,8 +566,15 @@ size_t modem_sock_recv(void *buf, size_t len, int timeout_ms)
 
 			size_t before = (rx_head + SOCK_RX - rx_tail) % SOCK_RX;
 
-			snprintf(cmd, sizeof(cmd), simcom ? "AT+CCHRECV=0,%d" : "AT+MIPRD=0,%d", READ_CHUNK);
-			if (modem_at(cmd, NULL, NULL, 5000) != ESP_OK) {
+			/* A7670C-LANV на AT+CCHRECV=0,4096 отвечает ERROR — у него кусок меньше */
+			snprintf(cmd, sizeof(cmd), simcom ? "AT+CCHRECV=0,%d" : "AT+MIPRD=0,%d",
+				 simcom ? SIM_CHUNK : READ_CHUNK);
+			esp_err_t err = modem_at(cmd, NULL, NULL, 5000);
+
+			if (err == ESP_FAIL && simcom) {
+				err = modem_at("AT+CCHRECV=0", NULL, NULL, 5000); /* всё, что есть */
+			}
+			if (err != ESP_OK) {
 				if (simcom) {
 					sock_unread = 0; /* ERROR — в буфере пусто */
 				}
@@ -574,7 +582,7 @@ size_t modem_sock_recv(void *buf, size_t len, int timeout_ms)
 			}
 			size_t got = (rx_head + SOCK_RX - rx_tail) % SOCK_RX - before;
 
-			if (rx_head == rx_tail || (simcom && got < READ_CHUNK)) {
+			if (rx_head == rx_tail || (simcom && got < SIM_CHUNK)) {
 				sock_unread = 0; /* модем говорит, что читать нечего; A7670C отдал меньше — всё */
 			}
 			continue;
