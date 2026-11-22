@@ -13,6 +13,8 @@ static int baud;
 static bool swapped;
 /* SIMCom A7670C: другие команды сокетов и TLS (AT+CCH*), принятое читаем AT+CCHRECV */
 static bool simcom;
+/* A7670C: сколько строк ответа модема ещё показать в консоли после открытия соединения (отладка) */
+static int trace_left;
 
 static bool starts(const char *s, const char *prefix);
 
@@ -122,6 +124,9 @@ static void take_cchrecv(const char *line, int64_t until)
 		sock_put(buf, got);
 		len -= got;
 	}
+	if (trace_left > 0) {
+		printf("HBOX AT< (data, %d bytes not received)\n", len);
+	}
 }
 
 /* Строка без \r\n; приглашение '>' приходит без перевода строки — отдаётся сразу. */
@@ -147,6 +152,10 @@ static esp_err_t read_line(char *line, int64_t until)
 				continue;
 			}
 			line[n] = '\0';
+			if (trace_left > 0) {
+				trace_left--;
+				printf("HBOX AT< %s\n", line);
+			}
 			/* +CCHCLOSE: — ответ на наше закрытие прежнего соединения, приходит с опозданием (уже
 			 * после открытия нового) — не обрыв */
 			if (starts(line, "+MIPURC: \"disconn\"") || starts(line, "+CCH_PEER_CLOSED:") ||
@@ -163,6 +172,10 @@ static esp_err_t read_line(char *line, int64_t until)
 			return ESP_OK;
 		}
 		if (n == 0 && c == '>') {
+			if (trace_left > 0) {
+				trace_left--;
+				printf("HBOX AT< >\n");
+			}
 			strcpy(line, ">");
 			return ESP_OK;
 		}
@@ -209,6 +222,9 @@ static esp_err_t wait_ok(const char *want, char *out, int64_t until)
 
 esp_err_t modem_at(const char *cmd, const char *want, char *out, int timeout_ms)
 {
+	if (trace_left > 0) {
+		printf("HBOX AT> %s\n", cmd);
+	}
 	tx_str(cmd);
 	tx_str("\r\n");
 	return wait_ok(want, out, deadline(timeout_ms));
@@ -219,6 +235,9 @@ esp_err_t modem_at_data(const char *cmd, const void *data, size_t len, int timeo
 	int64_t until = deadline(timeout_ms);
 	char line[MODEM_LINE_MAX];
 
+	if (trace_left > 0) {
+		printf("HBOX AT> %s + %u bytes\n", cmd, (unsigned)len);
+	}
 	tx_str(cmd);
 	tx_str("\r\n");
 	for (;;) {
@@ -459,6 +478,12 @@ esp_err_t modem_sock_open(int id, int ssl_id, const char *host, int port, char *
 		int sid, err = -1;
 
 		if (sscanf(line, "+CCHOPEN: %d,%d", &sid, &err) == 2 && err == 0) {
+			static bool traced;
+
+			if (!traced) {
+				traced = true;
+				trace_left = 80;
+			}
 			return ESP_OK;
 		}
 		if (err == 15 && !diag_done) {
