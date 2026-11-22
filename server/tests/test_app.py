@@ -458,3 +458,33 @@ def test_boots_recorded(client):
     client.get("/hbox/v1/config?rec=1&uptime=101&reset=1", headers=AUTH)
     client.get("/hbox/v1/config?rec=1&uptime=0&reset=4", headers=AUTH)
     assert [b["reset"] for b in devices.load()["cafe-1"]["boots"]] == [1, 4]
+
+
+def test_register_by_imei(site):
+    q = {"imei": "861234567890123", "mac": "A0B1C2D3E4F5", "fw": "abc1234"}
+    assert site.get("/hbox/v1/register", params={**q, "imei": "x"}).status_code == 400
+    assert site.get("/hbox/v1/register", params=q).status_code == 202
+    page = site.get("/hbox/admin/", auth=ADMIN).text
+    assert "861234567890123" in page and 'value="hbox-1"' in page
+    # чужое имя не отдаём
+    site.post("/hbox/admin/approve", data={"imei": q["imei"], "name": "cafe-1"}, headers=SITE, auth=ADMIN)
+    assert devices.load()["cafe-1"]["token"] == "t1"
+    assert site.post("/hbox/admin/approve", data={"imei": q["imei"], "name": "hbox-1"}, headers=SITE, auth=ADMIN,
+                     follow_redirects=False).status_code == 303
+    # другая плата с тем же IMEI токен не получает
+    assert site.get("/hbox/v1/register", params={**q, "mac": "000000000000"}).status_code == 202
+    token = site.get("/hbox/v1/register", params=q).json()["token"]
+    assert devices.load()["hbox-1"]["imei"] == q["imei"]
+    auth = {"Authorization": f"Bearer {token}"}
+    assert site.get("/hbox/v1/config", params={"imei": q["imei"]}, headers=auth).json()["channel"] == "hbox-1"
+    assert devices.requests() == {}  # забрала — заявка снята
+    # плата потеряла токен: снова просится, предлагается прежнее имя, токен новый
+    site.get("/hbox/v1/register", params=q)
+    assert devices.requests()[q["imei"]]["was"] == "hbox-1"
+    site.post("/hbox/admin/approve", data={"imei": q["imei"], "name": "hbox-1"}, headers=SITE, auth=ADMIN)
+    assert site.get("/hbox/v1/register", params=q).json()["token"] != token
+    assert site.get("/hbox/v1/config", headers=auth).status_code == 401
+    # отклонить
+    site.get("/hbox/v1/register", params={**q, "imei": "869999999999999"})
+    site.post("/hbox/admin/reject", data={"imei": "869999999999999"}, headers=SITE, auth=ADMIN)
+    assert "869999999999999" not in devices.requests()

@@ -9,6 +9,7 @@
          отбрасывается). upto — CRC начала файла по конец этого куска: не сошёлся — кусок
          выбрасывается (422, size = N). Когда принято T байт и CRC сошёлся — файл готов.
     GET  /hbox/v1/config?<состояние>             → настройки записи устройства
+    GET  /hbox/v1/register?imei=&mac=&fw=        → плата без токена: 202 ждать, 200 {"token"} — приняли на сайте
     POST /hbox/speedtest                         → замер скорости (тело выбрасывается)
     /hbox/admin/...                              → сайт (admin.py)
 
@@ -264,8 +265,11 @@ async def config(request: Request):
             status[k] = v
     if OPERATOR.match(request.query_params.get("op", "")):
         status["op"] = request.query_params["op"].replace("_", " ")
+    if devices.IMEI.match(request.query_params.get("imei", "")):
+        status["imei"] = request.query_params["imei"]
     if status:
         devices.report(dev, status)
+    devices.claimed(dev)
     d = devices.load()[dev]
     record, recheck = devices.recording_now(d)
     answer = {"record": record, "format": d["format"], "bitrate": d["bitrate"],
@@ -282,6 +286,18 @@ async def config(request: Request):
         answer.update(ota_name=ota["name"], ota_size=ota["size"], ota_crc=f"{ota['crc']:08x}",
                       ota_version=ota["version"])
     return JSONResponse(answer)
+
+
+async def register(request: Request):
+    q = request.query_params
+    imei, mac, fw = q.get("imei", ""), q.get("mac", "").lower(), q.get("fw", "")
+    if not (devices.IMEI.match(imei) and devices.MAC.match(mac)):
+        return error(400, "imei, mac")
+    token = devices.register(imei, mac, fw if FW_VERSION.match(fw) else "")
+    if not token:
+        return JSONResponse({"wait": 30}, status_code=202)
+    log.info("register %s: token issued", imei)
+    return JSONResponse({"token": token})
 
 
 async def firmware_get(request: Request):
@@ -369,6 +385,7 @@ API = [
     Route("/files/{name}", file_status, methods=["GET"]),
     Route("/files/{name}", file_put, methods=["PUT"]),
     Route("/config", config, methods=["GET"]),
+    Route("/register", register, methods=["GET"]),
     Route("/firmware/{name}", firmware_get, methods=["GET"]),
 ]
 # Запасной путь устройства через Cloudflare (hbox.fabtech.uz:443): тоннель пропускает только

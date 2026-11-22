@@ -36,7 +36,7 @@ STATUS_TITLES = {
     "cpu": "кодирование, %", "sent": "отправлено файлов", "kbps": "скорость, КБ/с",
     "files": "записано файлов", "uptime": "работает, мин", "reset": "причина перезапуска",
     "pending_mb": "ждут отправки, МБ", "sd_free": "SD свободно", "sd_total": "SD всего",
-    "fw": "прошивка", "fw_bad": "не запустилась прошивка", "op": "оператор",
+    "fw": "прошивка", "fw_bad": "не запустилась прошивка", "op": "оператор", "imei": "IMEI модема",
 }
 QUEUE_BAD_H = 6     # отправка отстаёт больше чем на столько часов записи
 SD_BAD_DAYS = 2     # места на карте меньше чем на столько дней записи
@@ -431,6 +431,41 @@ def device_card(dev: str, d: dict, now: float) -> str:
         + f"{last}</div>")
 
 
+def free_name(devs: dict) -> str:
+    n = 1
+    while f"hbox-{n}" in devs:
+        n += 1
+    return f"hbox-{n}"
+
+
+def ago(now: float, t: float) -> str:
+    m = int((now - t) // 60)
+    return "только что" if m < 1 else f"{m} мин назад" if m < 60 else f"{m // 60} ч назад"
+
+
+def register_box(devs: dict, now: float) -> str:
+    """Платы без токена, которые просятся на сервер."""
+    rows = []
+    taken = set(devs)
+    for imei, r in sorted(devices.requests().items(), key=lambda x: -x[1]["seen"]):
+        who = (f"IMEI <b>{esc(imei)}</b> · MAC {esc(r['mac'])} · прошивка {esc(r.get('fw') or '?')} · "
+               f"{ago(now, r['seen'])}")
+        if r.get("dev"):
+            rows.append(f'<div class="box">{who}<br>Принята как <b>{esc(r["dev"])}</b>, '
+                        "плата заберёт токен при следующей связи (до 30 с).</div>")
+            continue
+        name = r.get("was") or free_name(taken)
+        taken.add(name)
+        was = f" Раньше была <b>{esc(r['was'])}</b> — примите под тем же именем." if r.get("was") else ""
+        rows.append(
+            f'<form class="box" method="post" action="{BASE}/approve">Новая плата: {who}.{was}<br>'
+            f'<input type="hidden" name="imei" value="{esc(imei)}">'
+            f'Имя: <input name="name" value="{esc(name)}" pattern="[a-z0-9-]{{1,32}}" required> '
+            '<button>Принять</button> '
+            f'<button formaction="{BASE}/reject" formnovalidate>Отклонить</button></form>')
+    return ("<h2>Новые платы</h2>" + "".join(rows)) if rows else ""
+
+
 @guarded
 async def index(request: Request):
     devs = devices.load()
@@ -438,6 +473,7 @@ async def index(request: Request):
     cards = "".join(device_card(dev, d, now) for dev, d in sorted(devs.items()))
     body = (
         "<h1>Hbox — устройства</h1>"
+        f"{register_box(devs, now)}"
         f'<div class="grid">{cards}</div>'
         f'<form class="box" method="post" action="{BASE}/add">Новое устройство: '
         '<input name="name" placeholder="cafe-1" pattern="[a-z0-9-]{1,32}" required> '
@@ -634,6 +670,25 @@ async def add(request: Request):
 
 
 @guarded
+async def approve(request: Request):
+    form = await request.form()
+    imei, name = str(form.get("imei", "")), str(form.get("name", "")).strip().lower()
+    if not DEV_NAME.match(name):
+        return page("Ошибка", f'<p>Имя: латиница, цифры, дефис, до 32 символов.</p><p><a href="{BASE}/">назад</a></p>')
+    try:
+        devices.approve(imei, name)
+    except ValueError as e:
+        return page("Ошибка", f'<p>{esc(e)}</p><p><a href="{BASE}/">назад</a></p>')
+    return RedirectResponse(f"{BASE}/", 303)
+
+
+@guarded
+async def reject(request: Request):
+    devices.reject(str((await request.form()).get("imei", "")))
+    return RedirectResponse(f"{BASE}/", 303)
+
+
+@guarded
 async def token_bat(request: Request):
     dev = request.path_params["dev"]
     d = devices.load().get(dev)
@@ -659,6 +714,8 @@ async def file(request: Request):
 routes = [
     Route("/", index),
     Route("/add", add, methods=["POST"]),
+    Route("/approve", approve, methods=["POST"]),
+    Route("/reject", reject, methods=["POST"]),
     Route("/device/{dev}", device),
     Route("/device/{dev}", device_save, methods=["POST"]),
     Route("/device/{dev}/firmware", firmware_upload, methods=["POST"]),

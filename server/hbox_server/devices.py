@@ -7,6 +7,7 @@
 
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -35,11 +36,95 @@ DEFAULT = {
 
 _lock = threading.Lock()
 
+# регистрация новой платы без токена: она шлёт IMEI модема и MAC ESP, на сайте её принимают под именем,
+# и при следующем запросе плата получает токен. Заявки — data/register.json.
+IMEI = re.compile(r"^\d{14,17}$")
+MAC = re.compile(r"^[0-9a-f]{12}$")
+REGISTER_KEPT = 30  # непринятых заявок — не больше (кто-то шлёт мусор)
+
 
 def _path() -> Path:
     from . import app  # путь к данным задаётся в app (подменяется в тестах)
 
     return app.DATA / "devices.json"
+
+
+def _reg_path() -> Path:
+    from . import app
+
+    return app.DATA / "register.json"
+
+
+def requests() -> dict:
+    try:
+        return json.loads(_reg_path().read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _reg_save(regs: dict):
+    p = _reg_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(regs, ensure_ascii=False, indent=1))
+    tmp.replace(p)
+
+
+def register(imei: str, mac: str, fw: str, now: float | None = None) -> str | None:
+    """Заявка платы; токен — когда её приняли на сайте (и плата та же: MAC совпал)."""
+    now = now or time.time()
+    with _lock:
+        regs = requests()
+        r = regs.get(imei)
+        if r and r.get("dev"):
+            if r["mac"] != mac:
+                return None
+            r["seen"] = now
+            _reg_save(regs)
+            d = load().get(r["dev"])
+            return d["token"] if d else None
+        old = next((n for n, d in load().items() if d.get("imei") == imei), None)
+        regs[imei] = {"mac": mac, "fw": fw, "first": (r or {}).get("first", now), "seen": now, "was": old}
+        waiting = sorted((k for k in regs if not regs[k].get("dev")), key=lambda k: regs[k]["seen"])
+        for k in waiting[:-REGISTER_KEPT]:
+            del regs[k]
+        _reg_save(regs)
+        return None
+
+
+def approve(imei: str, name: str):
+    """Принять заявку под именем: новое устройство или прежнее с этим IMEI (новый токен)."""
+    with _lock:
+        regs, devs = requests(), load()
+        r = regs.get(imei)
+        if not r:
+            raise ValueError("нет заявки")
+        if name in devs and devs[name].get("imei") != imei:
+            raise ValueError(f"{name} уже есть")
+        d = devs.get(name) or dict(DEFAULT)
+        d.update(token=secrets.token_hex(16), imei=imei, mac=r["mac"])
+        devs[name] = d
+        r["dev"] = name
+        save(devs)
+        _reg_save(regs)
+
+
+def reject(imei: str):
+    with _lock:
+        regs = requests()
+        if regs.pop(imei, None) is not None:
+            _reg_save(regs)
+
+
+def claimed(dev: str):
+    """Плата пришла со своим токеном — заявка больше не нужна."""
+    with _lock:
+        regs = requests()
+        done = [k for k, r in regs.items() if r.get("dev") == dev]
+        if done:
+            for k in done:
+                del regs[k]
+            _reg_save(regs)
 
 
 def load() -> dict:

@@ -7,6 +7,7 @@
 #include <time.h>
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
+#include <esp_mac.h>
 #include <esp_ota_ops.h>
 #include <esp_rom_crc.h>
 #include <esp_system.h>
@@ -55,6 +56,8 @@ static struct uplink_stats stats = {.state = "modem", .csq = -1};
 static void url_safe(char *s);
 /* оператор сети (AT+COPS?), для сайта */
 static char op[25] = "";
+/* IMEI модема (AT+CGSN): по нему плату без токена принимают на сайте */
+static char imei[20] = "";
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static bool sock_open;
 /* nginx закрывает простаивающее соединение через 120 с — заранее открываем новое */
@@ -116,6 +119,20 @@ static esp_err_t modem_setup(void)
 	if (err) {
 		printf("HBOX UP modem not found (%s)\n", esp_err_to_name(err));
 		return err;
+	}
+	if (!imei[0]) {
+		line[0] = '\0';
+		modem_at("AT+CGSN", "", line, 2000);
+		/* "861234567890123" или "+CGSN: ..." — берём цифры */
+		size_t n = 0;
+
+		for (const char *c = line; *c && n < sizeof(imei) - 1; c++) {
+			if (isdigit((unsigned char)*c)) {
+				imei[n++] = *c;
+			}
+		}
+		imei[n >= 14 ? n : 0] = '\0';
+		printf("HBOX UP modem IMEI %s\n", imei[0] ? imei : "?");
 	}
 	set_state("net");
 	for (int i = 0;; i++) {
@@ -626,13 +643,13 @@ static int fetch_config(void)
 	snprintf(path, sizeof(path),
 		 "/hbox/v1/config?rec=%d&files=%lu&pending=%lu&dropped=%lu&overflows=%lu&rec_errors=%lu"
 		 "&cpu=%lu&csq=%d&up_errors=%lu&sent=%lu&kbps=%lu&uptime=%lld&reset=%d"
-		 "&sd_free=%lu&sd_total=%lu&pending_mb=%lu&fw=%s&fw_bad=%s&op=%s",
+		 "&sd_free=%lu&sd_total=%lu&pending_mb=%lu&fw=%s&fw_bad=%s&op=%s&imei=%s",
 		 rec.recording, (unsigned long)rec.files, (unsigned long)store_pending(),
 		 (unsigned long)store_dropped(), (unsigned long)rec.overflows, (unsigned long)rec.errors,
 		 (unsigned long)rec.cpu10 / 10, stats.csq, (unsigned long)stats.errors,
 		 (unsigned long)stats.sent_files, (unsigned long)stats.kbps10 / 10,
 		 esp_timer_get_time() / 60000000, (int)esp_reset_reason(), (unsigned long)sd_free,
-		 (unsigned long)sd_total, (unsigned long)pending_mb, fw_version(), fw_bad, op);
+		 (unsigned long)sd_total, (unsigned long)pending_mb, fw_version(), fw_bad, op, imei);
 	code = http("GET", path, NULL, 0, 0);
 
 	if (code != 200) {
@@ -680,6 +697,32 @@ static int fetch_config(void)
 	long recheck = json_long("recheck", CONFIG_EVERY_S);
 
 	return recheck < 5 ? 5 : recheck > CONFIG_EVERY_S ? CONFIG_EVERY_S : recheck;
+}
+
+/* Плата без токена просится на сервер по IMEI и MAC; когда её примут на сайте, сервер отдаёт токен.
+ * Код HTTP: 200 — токен сохранён, 202 — ждём. */
+static int register_device(void)
+{
+	char path[160], token[sizeof(cfg->token)];
+	uint8_t mac[6] = {0};
+	int code;
+
+	esp_efuse_mac_get_default(mac);
+	snprintf(path, sizeof(path), "/hbox/v1/register?imei=%s&mac=%02x%02x%02x%02x%02x%02x&fw=%s", imei, mac[0],
+		 mac[1], mac[2], mac[3], mac[4], mac[5], fw_version());
+	code = http("GET", path, NULL, 0, 0);
+	if (code == 200 && json_str("token", token, sizeof(token)) && token[0]) {
+		strcpy(cfg->token, token);
+		cfg->channel[0] = '\0';
+		settings_save(cfg);
+		printf("HBOX UP registered: token saved\n");
+	} else if (code == 202) {
+		printf("HBOX UP waiting for approval on the site: IMEI %s MAC %02x%02x%02x%02x%02x%02x\n", imei,
+		       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	} else {
+		printf("HBOX UP register failed (%d)\n", code);
+	}
+	return code;
 }
 
 /* <канал>_YYYYMMDD_HHMMSS.<ext>; false — времени ещё нет */
@@ -864,12 +907,6 @@ static void task(void *arg)
 	int64_t reboot_us = 0;
 
 	for (;;) {
-		if (!cfg->token[0]) {
-			set_state("token");
-			printf("HBOX UP no token: type t <token> in the console\n");
-			vTaskDelay(pdMS_TO_TICKS(30000));
-			continue;
-		}
 		if (!ready || failures >= 5) {
 			int64_t now = esp_timer_get_time();
 
@@ -894,6 +931,27 @@ static void task(void *arg)
 				continue;
 			}
 			config_at = 0;
+		}
+		if (!cfg->token[0]) {
+			/* токена нет — просимся по IMEI (или t <токен> в консоли) */
+			if (!imei[0]) {
+				set_state("token");
+				printf("HBOX UP no token and no IMEI: type t <token> in the console\n");
+				ready = false; /* IMEI спросим заново */
+			} else {
+				set_state("register");
+				int code = register_device();
+
+				if (code < 0) {
+					failures++;
+				}
+				if (cfg->token[0]) {
+					config_at = 0;
+					continue;
+				}
+			}
+			vTaskDelay(pdMS_TO_TICKS(30000));
+			continue;
 		}
 		int got = config_if_due();
 
