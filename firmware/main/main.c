@@ -52,6 +52,12 @@ static void command(char *line)
 		settings.channel[0] = '\0';
 		settings_save(&settings);
 		printf("HBOX token saved\n");
+	} else if (strcmp(line, "r") == 0) {
+		/* забыть токен: плата снова просится на сервер (регистрация по IMEI) */
+		settings.token[0] = '\0';
+		settings.channel[0] = '\0';
+		settings_save(&settings);
+		printf("HBOX token cleared\n");
 	} else if (strcmp(line, "s") == 0) {
 		status();
 	}

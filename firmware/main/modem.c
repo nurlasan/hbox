@@ -11,6 +11,8 @@
 
 static int baud;
 static bool swapped;
+/* SIMCom A7670C: другие команды сокетов и TLS (AT+CCH*), принятое читаем AT+CCHRECV */
+static bool simcom;
 
 static bool starts(const char *s, const char *prefix);
 
@@ -40,7 +42,7 @@ static void tx_str(const char *s)
 static uint8_t sock_rx[SOCK_RX];
 static size_t rx_head, rx_tail;
 static volatile bool sock_closed;
-/* сколько байт ждёт в буфере модема (по +MIPURC "rtcp" и +MIPRD) */
+/* сколько байт ждёт в буфере модема (по +MIPURC "rtcp" и +MIPRD); у A7670C — 1, если что-то есть */
 static volatile size_t sock_unread;
 #define READ_CHUNK 4096
 
@@ -100,6 +102,28 @@ static bool take_miprd(const char *line, size_t n, int64_t until)
 	return true;
 }
 
+/* +CCHRECV: DATA,<id>,<длина> — следом сырые байты (A7670C) */
+static void take_cchrecv(const char *line, int64_t until)
+{
+	int id, len;
+	uint8_t buf[256];
+
+	if (sscanf(line, "+CCHRECV: DATA,%d,%d", &id, &len) != 2) {
+		return;
+	}
+	while (len > 0) {
+		int64_t wait = until - esp_timer_get_time();
+		int got = uart_read_bytes(UART, buf, len < (int)sizeof(buf) ? len : (int)sizeof(buf),
+					  pdMS_TO_TICKS((wait > 1000000 ? wait : 1000000) / 1000));
+
+		if (got <= 0) {
+			break;
+		}
+		sock_put(buf, got);
+		len -= got;
+	}
+}
+
 /* Строка без \r\n; приглашение '>' приходит без перевода строки — отдаётся сразу. */
 static esp_err_t read_line(char *line, int64_t until)
 {
@@ -123,10 +147,16 @@ static esp_err_t read_line(char *line, int64_t until)
 				continue;
 			}
 			line[n] = '\0';
-			if (starts(line, "+MIPURC: \"disconn\"")) {
+			if (starts(line, "+MIPURC: \"disconn\"") || starts(line, "+CCH_PEER_CLOSED:") ||
+			    starts(line, "+CCHCLOSE:")) {
 				sock_closed = true;
 			} else if (starts(line, "+MIPURC: \"rtcp\"")) {
 				note_rtcp(line);
+			} else if (starts(line, "+CCHEVENT:") && strstr(line, "RECV EVENT")) {
+				sock_unread = 1;
+			} else if (starts(line, "+CCHRECV: DATA,")) {
+				take_cchrecv(line, until);
+				line[0] = '\0';
 			}
 			return ESP_OK;
 		}
@@ -275,6 +305,11 @@ esp_err_t modem_open(void)
 		return ESP_ERR_NOT_FOUND;
 	}
 	modem_at("ATE0", NULL, NULL, 1000);
+	char model[MODEM_LINE_MAX] = "";
+
+	modem_at("AT+CGMM", "", model, 1000);
+	simcom = strstr(model, "A76") || strstr(model, "A78") || strstr(model, "SIMCOM");
+	printf("HBOX MODEM model %s (%s)\n", model[0] ? model : "?", simcom ? "SIMCom" : "ML307");
 	if (baud != MODEM_BAUD) {
 		char cmd[24];
 
@@ -303,6 +338,98 @@ bool modem_swapped(void)
 	return swapped;
 }
 
+bool modem_simcom(void)
+{
+	return simcom;
+}
+
+esp_err_t modem_net_up(void)
+{
+	char line[MODEM_LINE_MAX] = "";
+
+	if (simcom) {
+		/* AT+CCHSTART сам поднимает интернет; принятое — вручную (CCHSET ...,1), до CCHSTART */
+		modem_at("AT+CCHSET=0,1", NULL, NULL, 2000);
+		if (modem_at("AT+CCHSTART", NULL, NULL, 5000) == ESP_OK) {
+			modem_wait("+CCHSTART:", line, 30000);
+		}
+		return ESP_OK; /* уже запущен — ERROR, это не ошибка */
+	}
+	/* ML307R: мобильный интернет обычно включается сам */
+	modem_at("AT+MIPCALL?", "+MIPCALL:", line, 2000);
+	if (!strstr(line, "+MIPCALL: 1,1")) {
+		modem_at("AT+MIPCALL=1,1", NULL, NULL, 5000);
+		modem_wait("+MIPCALL:", line, 30000);
+	}
+	return ESP_OK;
+}
+
+esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem)
+{
+	char cmd[96];
+	size_t len = strlen(pem);
+	esp_err_t err;
+
+	if (simcom) {
+		snprintf(cmd, sizeof(cmd), "AT+CCERTDOWN=\"%s\",%u", name, (unsigned)len);
+		err = modem_at_data(cmd, pem, len, 10000);
+		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"sslversion\",%d,4", ssl_id);
+		err = err ?: modem_at(cmd, NULL, NULL, 2000);
+		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"authmode\",%d,1", ssl_id);
+		err = err ?: modem_at(cmd, NULL, NULL, 2000);
+		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"cacert\",%d,\"%s\"", ssl_id, name);
+		err = err ?: modem_at(cmd, NULL, NULL, 2000);
+		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"enableSNI\",%d,1", ssl_id);
+		modem_at(cmd, NULL, NULL, 2000);
+		return err;
+	}
+	/* Сертификат одним куском, как в примере документации: запись кусками (remain_length) модем
+	 * не принял (9f13f54), а 6 КБ одним куском — тоже (f346022). Поэтому у Cloudflare один корень. */
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",0,%u", name, (unsigned)len);
+	err = modem_at_data(cmd, pem, len, 5000);
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"auth\",%d,1", ssl_id);
+	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"cert\",%d,\"%s\"", ssl_id, name);
+	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	return err;
+}
+
+esp_err_t modem_sock_open(int id, int ssl_id, const char *host, int port, char *line)
+{
+	char cmd[96];
+
+	line[0] = '\0';
+	if (simcom) {
+		snprintf(cmd, sizeof(cmd), "AT+CCHSSLCFG=%d,%d", id, ssl_id);
+		modem_at(cmd, NULL, NULL, 2000);
+		snprintf(cmd, sizeof(cmd), "AT+CCHOPEN=%d,\"%s\",%d,2", id, host, port);
+		if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+CCHOPEN:", line, 70000) != ESP_OK) {
+			return ESP_FAIL;
+		}
+		/* +CCHOPEN: <id>,0 — открыт */
+		int sid, err;
+
+		return sscanf(line, "+CCHOPEN: %d,%d", &sid, &err) == 2 && err == 0 ? ESP_OK : ESP_FAIL;
+	}
+	snprintf(cmd, sizeof(cmd), "AT+MIPCFG=\"ssl\",%d,1,%d", id, ssl_id);
+	modem_at(cmd, NULL, NULL, 2000);
+	/* режим буфера (,2): принятое ждёт в модеме, забираем AT+MIPRD */
+	snprintf(cmd, sizeof(cmd), "AT+MIPOPEN=%d,\"TCP\",\"%s\",%d,60,2", id, host, port);
+	if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+MIPOPEN:", line, 70000) != ESP_OK ||
+	    !strstr(line, ",0")) {
+		return ESP_FAIL;
+	}
+	return ESP_OK;
+}
+
+void modem_sock_close(int id)
+{
+	char cmd[24];
+
+	snprintf(cmd, sizeof(cmd), simcom ? "AT+CCHCLOSE=%d" : "AT+MIPCLOSE=%d", id);
+	modem_at(cmd, NULL, NULL, 5000);
+}
+
 void modem_sock_reset(void)
 {
 	rx_head = rx_tail = 0;
@@ -321,13 +448,14 @@ esp_err_t modem_sock_send(int id, const void *data, size_t len, int timeout_ms)
 	char cmd[32];
 
 	while (len) {
-		size_t n = len < MODEM_SEND_MAX ? len : MODEM_SEND_MAX;
+		size_t max = simcom ? 2048 : MODEM_SEND_MAX; /* AT+CCHSEND берёт до 2048 */
+		size_t n = len < max ? len : max;
 		esp_err_t err;
 
 		if (sock_closed) {
 			return ESP_ERR_INVALID_STATE;
 		}
-		snprintf(cmd, sizeof(cmd), "AT+MIPSEND=%d,%u", id, (unsigned)n);
+		snprintf(cmd, sizeof(cmd), simcom ? "AT+CCHSEND=%d,%u" : "AT+MIPSEND=%d,%u", id, (unsigned)n);
 		err = modem_at_data(cmd, p, n, timeout_ms);
 		if (err) {
 			return err;
@@ -350,12 +478,19 @@ size_t modem_sock_recv(void *buf, size_t len, int timeout_ms)
 		if (sock_unread) {
 			char cmd[32];
 
-			snprintf(cmd, sizeof(cmd), "AT+MIPRD=0,%d", READ_CHUNK);
+			size_t before = (rx_head + SOCK_RX - rx_tail) % SOCK_RX;
+
+			snprintf(cmd, sizeof(cmd), simcom ? "AT+CCHRECV=0,%d" : "AT+MIPRD=0,%d", READ_CHUNK);
 			if (modem_at(cmd, NULL, NULL, 5000) != ESP_OK) {
+				if (simcom) {
+					sock_unread = 0; /* ERROR — в буфере пусто */
+				}
 				break;
 			}
-			if (rx_head == rx_tail) {
-				sock_unread = 0; /* модем говорит, что читать нечего */
+			size_t got = (rx_head + SOCK_RX - rx_tail) % SOCK_RX - before;
+
+			if (rx_head == rx_tail || (simcom && got < READ_CHUNK)) {
+				sock_unread = 0; /* модем говорит, что читать нечего; A7670C отдал меньше — всё */
 			}
 			continue;
 		}

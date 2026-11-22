@@ -81,31 +81,14 @@ static void set_state(const char *s)
 
 /* --- модем и TLS --- */
 
-/* Сертификат одним куском, как в примере документации: запись кусками (remain_length) модем
- * не принял (9f13f54), а 6 КБ одним куском — тоже (f346022). Поэтому у Cloudflare один корень. */
-static esp_err_t cert_write(const char *name, const char *pem)
-{
-	char cmd[96];
-
-	snprintf(cmd, sizeof(cmd), "AT+MSSLCERTWR=\"%s\",0,%u", name, (unsigned)strlen(pem));
-	if (modem_at_data(cmd, pem, strlen(pem), 5000) != ESP_OK) {
-		printf("HBOX UP cert %s failed\n", name);
-		return ESP_FAIL;
-	}
-	return ESP_OK;
-}
-
 static esp_err_t tls_setup(int i)
 {
-	char cmd[96];
-	const char *name = i ? CF_NAME : CA_NAME, *pem = i ? cf_pem_start : ca_pem_start;
-	int id = routes[i].ssl_id;
-	esp_err_t err = cert_write(name, pem);
+	const char *name = i ? CF_NAME : CA_NAME;
+	esp_err_t err = modem_tls_cert(routes[i].ssl_id, name, i ? cf_pem_start : ca_pem_start);
 
-	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"auth\",%d,1", id);
-	err = err ?: modem_at(cmd, NULL, NULL, 2000);
-	snprintf(cmd, sizeof(cmd), "AT+MSSLCFG=\"cert\",%d,\"%s\"", id, name);
-	err = err ?: modem_at(cmd, NULL, NULL, 2000);
+	if (err) {
+		printf("HBOX UP cert %s failed\n", name);
+	}
 	return err;
 }
 
@@ -121,9 +104,12 @@ static esp_err_t modem_setup(void)
 		return err;
 	}
 	if (!imei[0]) {
+		/* ML307R: AT+CGSN=1 -> +CGSN: "IMEI" (простой AT+CGSN — серийный номер модуля);
+		 * A7670C: AT+CGSN -> IMEI строкой цифр */
 		line[0] = '\0';
-		modem_at("AT+CGSN", "", line, 2000);
-		/* "861234567890123" или "+CGSN: ..." — берём цифры */
+		if (modem_at("AT+CGSN=1", "+CGSN:", line, 2000) != ESP_OK || !line[0]) {
+			modem_at("AT+CGSN", "", line, 2000);
+		}
 		size_t n = 0;
 
 		for (const char *c = line; *c && n < sizeof(imei) - 1; c++) {
@@ -131,7 +117,7 @@ static esp_err_t modem_setup(void)
 				imei[n++] = *c;
 			}
 		}
-		imei[n >= 14 ? n : 0] = '\0';
+		imei[n >= 14 ? n : 0] = '\0'; /* не IMEI, так серийный номер — тоже свой у каждого модема */
 		printf("HBOX UP modem IMEI %s\n", imei[0] ? imei : "?");
 	}
 	set_state("net");
@@ -164,13 +150,7 @@ static esp_err_t modem_setup(void)
 			printf("HBOX UP operator %s\n", op);
 		}
 	}
-	/* мобильный интернет: обычно включается сам */
-	line[0] = '\0';
-	modem_at("AT+MIPCALL?", "+MIPCALL:", line, 2000);
-	if (!strstr(line, "+MIPCALL: 1,1")) {
-		modem_at("AT+MIPCALL=1,1", NULL, NULL, 5000);
-		modem_wait("+MIPCALL:", line, 30000);
-	}
+	modem_net_up();
 
 	/* TLS с проверкой сервера: напрямую — по нашему CA, через Cloudflare — по публичным корням.
 	 * Без запасного пути работать можно: его сбой не мешает прямому. */
@@ -191,16 +171,13 @@ static esp_err_t modem_setup(void)
 
 static void sock_close(void)
 {
-	char cmd[24];
-
-	snprintf(cmd, sizeof(cmd), "AT+MIPCLOSE=%d", SOCK);
-	modem_at(cmd, NULL, NULL, 5000);
+	modem_sock_close(SOCK);
 	sock_open = false;
 }
 
 static esp_err_t sock_connect(void)
 {
-	char cmd[80], line[MODEM_LINE_MAX] = "";
+	char line[MODEM_LINE_MAX] = "";
 
 	if (sock_open && !modem_sock_closed() && esp_timer_get_time() - sock_used_us < SOCK_IDLE_US) {
 		return ESP_OK;
@@ -214,12 +191,7 @@ static esp_err_t sock_connect(void)
 	}
 	const struct route *r = &routes[route];
 
-	snprintf(cmd, sizeof(cmd), "AT+MIPCFG=\"ssl\",%d,1,%d", SOCK, r->ssl_id);
-	modem_at(cmd, NULL, NULL, 2000);
-	/* режим буфера (,2): принятое ждёт в модеме, забираем AT+MIPRD — см. modem.c */
-	snprintf(cmd, sizeof(cmd), "AT+MIPOPEN=%d,\"TCP\",\"%s\",%d,60,2", SOCK, r->host, r->port);
-	if (modem_at(cmd, NULL, line, 5000) != ESP_OK || modem_wait("+MIPOPEN:", line, 70000) != ESP_OK ||
-	    !strstr(line, ",0")) {
+	if (modem_sock_open(SOCK, r->ssl_id, r->host, r->port, line) != ESP_OK) {
 		printf("HBOX UP connect failed (%s) %s\n", r->name, line);
 		if (++route_fails >= ROUTE_FAILS && (cf_ready || route)) {
 			pin_failed = route_want[0] != '\0';

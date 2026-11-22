@@ -32,7 +32,18 @@ esp_err_t modem_at_data(const char *cmd, const void *data, size_t len, int timeo
 /* Ждёт строку с префиксом (URC), остальные пропускает. */
 esp_err_t modem_wait(const char *prefix, char *out, int timeout_ms);
 
-/* --- TCP/TLS-сокет ML307R (AT+MIPOPEN — у вызывающего) --- */
+/* модем SIMCom (A7670C), а не ML307R — определяется по AT+CGMM в modem_open() */
+bool modem_simcom(void);
+/* мобильный интернет: ML307R — AT+MIPCALL, A7670C — AT+CCHSTART */
+esp_err_t modem_net_up(void);
+/* сертификат CA для проверки сервера и настройка TLS-профиля ssl_id */
+esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem);
+
+/* --- TCP/TLS-сокет: ML307R — AT+MIP*, A7670C — AT+CCH* --- */
+
+/* TLS-соединение; line — последний ответ модема (для сообщения об ошибке) */
+esp_err_t modem_sock_open(int id, int ssl_id, const char *host, int port, char *line);
+void modem_sock_close(int id);
 
 /* больше AT+MIPSEND за раз не берёт */
 #define MODEM_SEND_MAX 8192
