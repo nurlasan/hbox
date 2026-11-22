@@ -399,7 +399,11 @@ def test_ota_flow(site):
     # обновилась — больше не предлагаем
     assert "ota_version" not in site.get("/hbox/v1/config?fw=abc1234", headers=AUTH).json()
     assert "обновлена до abc1234" in site.get("/hbox/admin/device/cafe-1?tab=fw", auth=ADMIN).text
+    # встала — назначение снято: после прошивки по USB другой версии старую не вернём
+    assert not devices.load()["cafe-1"].get("ota")
+    assert "ota_version" not in site.get("/hbox/v1/config?fw=newer9", headers=AUTH).json()
     # откат: не предлагаем снова, на сайте — проблема
+    devices.update("cafe-1", ota=ota)
     assert "ota_version" not in site.get("/hbox/v1/config?fw=old1&fw_bad=abc1234", headers=AUTH).json()
     assert "прошивка abc1234 не запустилась" in site.get("/hbox/admin/", auth=ADMIN).text
     # мусор в версии не сохраняем

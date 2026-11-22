@@ -100,7 +100,9 @@ def health(dev: str, d: dict, now: float) -> tuple[list[str], list[str]]:
 
 def firmware_box(dev: str, d: dict, rels: list[dict]) -> str:
     st, ota = d.get("status", {}), d.get("ota")
-    if not ota:
+    if not ota and d.get("ota_done") and d["ota_done"] == st.get("fw"):
+        state = f"обновлена до {esc(d['ota_done'])}"
+    elif not ota:
         state = "обновлений не назначено"
     elif st.get("fw") == ota["version"]:
         state = f"обновлена до {esc(ota['version'])}"

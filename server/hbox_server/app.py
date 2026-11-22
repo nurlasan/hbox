@@ -274,6 +274,10 @@ async def config(request: Request):
     if d.get("route") in devices.ROUTES:
         answer["route"] = d["route"]
     ota = d.get("ota")
+    if ota and status.get("fw") == ota["version"]:
+        # встала — снять назначение, иначе после прошивки по USB другой версии сервер вернул бы эту
+        devices.update(dev, ota=None, ota_done=ota["version"])
+        ota = None
     if ota and ota["version"] not in (status.get("fw"), status.get("fw_bad")):
         answer.update(ota_name=ota["name"], ota_size=ota["size"], ota_crc=f"{ota['crc']:08x}",
                       ota_version=ota["version"])
