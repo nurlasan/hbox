@@ -364,7 +364,7 @@ esp_err_t modem_net_up(void)
 	return ESP_OK;
 }
 
-esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem)
+esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem, bool sni)
 {
 	char cmd[96];
 	size_t len = strlen(pem);
@@ -379,7 +379,11 @@ esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem)
 		err = err ?: modem_at(cmd, NULL, NULL, 2000);
 		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"cacert\",%d,\"%s\"", ssl_id, name);
 		err = err ?: modem_at(cmd, NULL, NULL, 2000);
-		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"enableSNI\",%d,1", ssl_id);
+		/* часы модема не выставлены — срок сертификата по ним не проверять (иначе +CCHOPEN: 0,15) */
+		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"ignorelocaltime\",%d,1", ssl_id);
+		modem_at(cmd, NULL, NULL, 2000);
+		/* имя сервера — только для Cloudflare; напрямую адрес IP */
+		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"enableSNI\",%d,%d", ssl_id, sni);
 		modem_at(cmd, NULL, NULL, 2000);
 		return err;
 	}

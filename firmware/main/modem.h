@@ -37,7 +37,7 @@ bool modem_simcom(void);
 /* мобильный интернет: ML307R — AT+MIPCALL, A7670C — AT+CCHSTART */
 esp_err_t modem_net_up(void);
 /* сертификат CA для проверки сервера и настройка TLS-профиля ssl_id */
-esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem);
+esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem, bool sni);
 
 /* --- TCP/TLS-сокет: ML307R — AT+MIP*, A7670C — AT+CCH* --- */
 

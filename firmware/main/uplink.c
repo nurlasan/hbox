@@ -84,7 +84,7 @@ static void set_state(const char *s)
 static esp_err_t tls_setup(int i)
 {
 	const char *name = i ? CF_NAME : CA_NAME;
-	esp_err_t err = modem_tls_cert(routes[i].ssl_id, name, i ? cf_pem_start : ca_pem_start);
+	esp_err_t err = modem_tls_cert(routes[i].ssl_id, name, i ? cf_pem_start : ca_pem_start, i == 1);
 
 	if (err) {
 		printf("HBOX UP cert %s failed\n", name);
