@@ -373,7 +373,8 @@ esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem, bool sni
 	if (simcom) {
 		snprintf(cmd, sizeof(cmd), "AT+CCERTDOWN=\"%s\",%u", name, (unsigned)len);
 		err = modem_at_data(cmd, pem, len, 10000);
-		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"sslversion\",%d,4", ssl_id);
+		/* только TLS 1.2: с 4 («все», вместе с SSL3) A7670C-LANV рвал соединение до ClientHello */
+		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"sslversion\",%d,3", ssl_id);
 		err = err ?: modem_at(cmd, NULL, NULL, 2000);
 		snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"authmode\",%d,1", ssl_id);
 		err = err ?: modem_at(cmd, NULL, NULL, 2000);
@@ -398,8 +399,50 @@ esp_err_t modem_tls_cert(int ssl_id, const char *name, const char *pem, bool sni
 	return err;
 }
 
+/* Ответ модема на команду целиком — в консоль (диагностика A7670C). */
+static void at_show(const char *cmd)
+{
+	char line[MODEM_LINE_MAX];
+	int64_t until = deadline(3000);
+
+	tx_str(cmd);
+	tx_str("\r\n");
+	while (read_line(line, until) == ESP_OK) {
+		if (line[0]) {
+			printf("HBOX MODEM %s: %s\n", cmd, line);
+		}
+		if (!strcmp(line, "OK") || is_error(line)) {
+			break;
+		}
+	}
+}
+
+/* A7670C не смог TLS (15): один раз — что знает модем и откроется ли без проверки сертификата
+ * (соединение сразу закрывается, ничего не шлём) */
+static void tls_diag(int id, const char *host, int port)
+{
+	char cmd[96], line[MODEM_LINE_MAX] = "";
+
+	at_show("AT+CCERTLIST");
+	at_show("AT+CCLK?");
+	at_show("AT+CSSLCFG?");
+	modem_at("AT+CSSLCFG=\"sslversion\",9,3", NULL, NULL, 2000);
+	modem_at("AT+CSSLCFG=\"authmode\",9,0", NULL, NULL, 2000);
+	snprintf(cmd, sizeof(cmd), "AT+CCHSSLCFG=%d,9", id);
+	modem_at(cmd, NULL, NULL, 2000);
+	snprintf(cmd, sizeof(cmd), "AT+CCHOPEN=%d,\"%s\",%d,2", id, host, port);
+	if (modem_at(cmd, NULL, line, 5000) == ESP_OK) {
+		modem_wait("+CCHOPEN:", line, 70000);
+	}
+	printf("HBOX MODEM diag without cert check: %s\n", line);
+	snprintf(cmd, sizeof(cmd), "AT+CCHCLOSE=%d", id);
+	modem_at(cmd, NULL, NULL, 5000);
+}
+
 esp_err_t modem_sock_open(int id, int ssl_id, const char *host, int port, char *line)
 {
+	static bool diag_done;
+
 	char cmd[96];
 
 	line[0] = '\0';
@@ -411,9 +454,20 @@ esp_err_t modem_sock_open(int id, int ssl_id, const char *host, int port, char *
 			return ESP_FAIL;
 		}
 		/* +CCHOPEN: <id>,0 — открыт */
-		int sid, err;
+		int sid, err = -1;
 
-		return sscanf(line, "+CCHOPEN: %d,%d", &sid, &err) == 2 && err == 0 ? ESP_OK : ESP_FAIL;
+		if (sscanf(line, "+CCHOPEN: %d,%d", &sid, &err) == 2 && err == 0) {
+			return ESP_OK;
+		}
+		if (err == 15 && !diag_done) {
+			diag_done = true;
+			char keep[MODEM_LINE_MAX];
+
+			strcpy(keep, line);
+			tls_diag(id, host, port);
+			strcpy(line, keep);
+		}
+		return ESP_FAIL;
 	}
 	snprintf(cmd, sizeof(cmd), "AT+MIPCFG=\"ssl\",%d,1,%d", id, ssl_id);
 	modem_at(cmd, NULL, NULL, 2000);
