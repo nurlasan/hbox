@@ -419,6 +419,8 @@ def test_signal_icon():
     assert admin.signal_bars(26) == 4 and admin.signal_bars(12) == 2 and admin.signal_bars(99) == 0
     svg = admin.signal_icon(12)
     assert svg.count("<rect") == 4 and svg.count("/>") == 4 and svg.count('class="on"') == 2
+    off = admin.signal_icon(26, "ALTEL", online=False)
+    assert 'class="on"' not in off and 'class="sig off"' in off
 
 
 def mp3_file(path, seconds):
@@ -488,3 +490,14 @@ def test_register_by_imei(site):
     site.get("/hbox/v1/register", params={**q, "imei": "869999999999999"})
     site.post("/hbox/admin/reject", data={"imei": "869999999999999"}, headers=SITE, auth=ADMIN)
     assert "869999999999999" not in devices.requests()
+
+
+def test_skip_queue(site):
+    old, new = "cafe-1_20261110_090000.mp3", "cafe-1_20991110_090000.mp3"
+    assert site.post("/hbox/admin/device/cafe-1/skip", headers=SITE, auth=ADMIN,
+                     follow_redirects=False).status_code == 303
+    assert site.get(f"/hbox/v1/files/{old}", headers=AUTH).json() == {"size": 0, "done": True}
+    assert put(site, b"abc", 0, 3, zlib.crc32(b"abc"), name=old).json()["done"] is True
+    assert not list((hbox.DATA / "cafe-1").rglob("*.mp3"))
+    assert site.get(f"/hbox/v1/files/{new}", headers=AUTH).json()["done"] is False
+    assert "Очистить очередь" in site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text

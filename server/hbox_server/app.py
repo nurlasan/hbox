@@ -136,6 +136,16 @@ def checkpoints(part: Path, size: int, ok: int | None = None) -> str:
     return ",".join(out)
 
 
+def skipped(dev: str, name: str) -> bool:
+    """Файл начат до «очистить очередь» на сайте — устройству отвечаем, что он уже принят."""
+    before = devices.load()[dev].get("skip_before")
+    if not before:
+        return False
+    m = NAME.match(name)
+    start = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc).timestamp()
+    return start < before
+
+
 def error(status: int, message: str, **extra) -> JSONResponse:
     return JSONResponse({"error": message, **extra}, status_code=status)
 
@@ -151,6 +161,8 @@ async def file_status(request: Request):
     name = request.path_params["name"]
     if not NAME.match(name):
         return error(400, "bad name")
+    if skipped(dev, name):
+        return JSONResponse({"size": 0, "done": True})
     final, part, state = paths(dev, name)
     if final.exists():
         return JSONResponse({"size": final.stat().st_size, "done": True})
@@ -168,6 +180,8 @@ async def file_put(request: Request):
     name = request.path_params["name"]
     if not NAME.match(name):
         return error(400, "bad name")
+    if skipped(dev, name):
+        return JSONResponse({"size": 0, "done": True})
     try:
         offset = int(request.query_params["offset"])
         total = int(request.query_params["total"])

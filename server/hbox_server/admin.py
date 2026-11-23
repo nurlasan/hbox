@@ -164,7 +164,7 @@ box-shadow:0 1px 2px rgba(0,0,0,.04);display:flex;flex-direction:column;gap:12px
 .dot{width:9px;height:9px;border-radius:50%;background:var(--off);display:inline-block}
 .dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 20%,transparent)}
 .sig{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
-.sig svg rect{fill:var(--off)} .sig svg rect.on{fill:var(--ok)} .sig b{color:var(--text);font-size:12px}
+.sig svg rect{fill:var(--off)} .sig svg rect.on{fill:var(--ok)} .sig b{color:var(--text);font-size:12px} .sig.off b{color:var(--muted)}
 .chip{display:inline-flex;align-items:center;gap:5px;background:var(--chip);border-radius:8px;
 padding:3px 9px;font-size:13px;font-weight:600}
 .chip svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2}
@@ -353,12 +353,14 @@ def signal_bars(csq) -> int:
     return 1 if csq < 10 else 2 if csq < 15 else 3 if csq < 20 else 4
 
 
-def signal_icon(csq, op: str | None = None) -> str:
-    n = signal_bars(csq)
+def signal_icon(csq, op: str | None = None, online: bool = True) -> str:
+    """нет связи — значок серый: сигнал последний известный"""
+    n = signal_bars(csq) if online else 0
     on = ' class="on"'
     bars = "".join(f'<rect x="{i * 5}" y="{12 - 3 * i}" width="3.5" height="{4 + 3 * i}" rx="1"'
                    f'{on if i < n else ""}/>' for i in range(4))
-    return (f'<span class="sig" title="сигнал CSQ {esc(csq)}"><svg width="22" height="18" '
+    title = f"сигнал CSQ {esc(csq)}" if online else f"нет связи (последний сигнал CSQ {esc(csq)})"
+    return (f'<span class="sig{"" if online else " off"}" title="{title}"><svg width="22" height="18" '
             f'viewBox="0 0 19 16">{bars}</svg><b>{esc(op) + " " if op else ""}4G</b></span>')
 
 
@@ -420,7 +422,7 @@ def device_card(dev: str, d: dict, now: float) -> str:
         f'<a class="name" href="{BASE}/device/{esc(dev)}">{esc(dev)}</a>'
         f'<span class="dot{" on" if online else ""}"></span>'
         f'<span class="small">{"на связи" if online else "нет связи"} · {local(seen) if seen else "никогда"}</span>'
-        f"</div>{signal_icon(st.get('csq'), st.get('op'))}</div>"
+        f"</div>{signal_icon(st.get('csq'), st.get('op'), online)}</div>"
         f'<div class="row">{rec}<span class="chip">{ICON_FILE}{esc(d["format"]).upper()}</span>'
         f'<span class="chip">{ICON_WAVE}{d["bitrate"] // 1000} kbps</span>'
         f'<span class="small">{sched}</span></div>'
@@ -528,7 +530,13 @@ async def device(request: Request):
         f'<p>{"Последняя связь: " + local(d["seen"]) if d.get("seen") else "Ещё не выходило на связь"}</p>'
         + "".join(f"<p>{esc(x)}</p>" for x in lines)
         + "".join(f'<p class="bad">{esc(x)}</p>' for x in problems)
-        + f'<table style="width:auto">{status}</table></div></div>')
+        + f'<table style="width:auto">{status}</table>'
+        + f'<form method="post" action="{BASE}/device/{esc(dev)}/skip" '
+        'onsubmit="return confirm(\'Пропустить все файлы, которые сейчас ждут отправки на карте?\')">'
+        '<button>Очистить очередь</button> <span class="muted">файлы, записанные до этой минуты, на сервер '
+        "не пойдут; на карте удалятся сами через 7 дней</span>"
+        + (f'<br><span class="muted">Очищено {local(d["skip_before"])}</span>' if d.get("skip_before") else "")
+        + "</form></div></div>")
     token = (f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
              f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>')
     tab_wanted = request.query_params.get("tab", "") or {"ota": "fw"}.get(request.query_params.get("msg", ""), "")
@@ -670,6 +678,15 @@ async def add(request: Request):
 
 
 @guarded
+async def skip_queue(request: Request):
+    dev = request.path_params["dev"]
+    if dev not in devices.load():
+        return Response("Нет такого устройства", 404)
+    devices.update(dev, skip_before=time.time())
+    return RedirectResponse(f"{BASE}/device/{dev}", 303)
+
+
+@guarded
 async def approve(request: Request):
     form = await request.form()
     imei, name = str(form.get("imei", "")), str(form.get("name", "")).strip().lower()
@@ -719,6 +736,7 @@ routes = [
     Route("/device/{dev}", device),
     Route("/device/{dev}", device_save, methods=["POST"]),
     Route("/device/{dev}/firmware", firmware_upload, methods=["POST"]),
+    Route("/device/{dev}/skip", skip_queue, methods=["POST"]),
     Route("/token/{dev}.bat", token_bat),
     Route("/file/{dev}/{day}/{name}", file),
 ]
