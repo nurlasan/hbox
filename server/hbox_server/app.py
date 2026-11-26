@@ -3,11 +3,13 @@
 Протокол — docs/protocol.md. Коротко:
     GET  /hbox/v1/files/<имя>                    → {"size": принято байт, "done": файл целый,
                                                      "check": "смещение:crc,..." — CRC начала файла}
-    PUT  /hbox/v1/files/<имя>?offset=N&total=T&crc=<crc32 hex>[&upto=<crc32 hex>]
+    PUT  /hbox/v1/files/<имя>?offset=N[&total=T&crc=<crc32 hex>][&upto=<crc32 hex>]
          тело — байты файла с позиции N (весь остаток или кусок); при обрыве принятое
          сохраняется, устройство спрашивает GET и продолжает с size (или раньше — тогда хвост
          отбрасывается). upto — CRC начала файла по конец этого куска: не сошёлся — кусок
          выбрасывается (422, size = N). Когда принято T байт и CRC сошёлся — файл готов.
+         Без total и crc — живой кусок файла, который ещё пишется (живой поток).
+    GET  /hbox/v1/stream/<устройство>.mp3?key=   → живой поток MP3 (stream.py)
     GET  /hbox/v1/config?<состояние>             → настройки записи устройства
     GET  /hbox/v1/register?imei=&mac=&fw=        → плата без токена: 202 ждать, 200 {"token"} — приняли на сайте
     POST /hbox/speedtest                         → замер скорости (тело выбрасывается)
@@ -34,7 +36,7 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 
-from . import admin, devices
+from . import admin, devices, stream
 
 log = logging.getLogger("hbox")
 
@@ -184,8 +186,9 @@ async def file_put(request: Request):
         return JSONResponse({"size": 0, "done": True})
     try:
         offset = int(request.query_params["offset"])
-        total = int(request.query_params["total"])
-        want_crc = int(request.query_params["crc"], 16)
+        # без total — живой кусок: файл ещё пишется, конец и CRC неизвестны
+        total = int(request.query_params["total"]) if "total" in request.query_params else None
+        want_crc = int(request.query_params["crc"], 16) if total is not None else None
         upto = int(request.query_params["upto"], 16) if "upto" in request.query_params else None
         body_len = int(request.headers.get("content-length", -1))
     except (KeyError, ValueError):
@@ -224,7 +227,7 @@ async def file_put(request: Request):
                 f.seek(size)
                 try:
                     async for chunk in request.stream():
-                        if size + len(chunk) > total:
+                        if total is not None and size + len(chunk) > total:
                             return error(400, "more than total", size=size)
                         f.write(chunk)
                         crc = zlib.crc32(chunk, crc)
@@ -245,10 +248,10 @@ async def file_put(request: Request):
             if upto is not None and size == offset + body_len:
                 ok = size
         finally:
-            save_state(state, size, crc, total, ok)
+            save_state(state, size, crc, total or 0, ok)
             devices.traffic(dev, got, time.monotonic() - started)
 
-        if size < total:
+        if total is None or size < total:
             return JSONResponse({"size": size, "done": False})
         if crc != want_crc:
             # испорчено где-то по дороге — заново с нуля
@@ -289,6 +292,8 @@ async def config(request: Request):
     answer = {"record": record, "format": d["format"], "bitrate": d["bitrate"],
               "recheck": recheck, "channel": dev,
               "time": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+    if d.get("stream_key"):
+        answer["live"] = True  # досылать текущий файл во время записи — для живого потока
     if d.get("route") in devices.ROUTES:
         answer["route"] = d["route"]
     ota = d.get("ota")
@@ -401,6 +406,7 @@ API = [
     Route("/config", config, methods=["GET"]),
     Route("/register", register, methods=["GET"]),
     Route("/firmware/{name}", firmware_get, methods=["GET"]),
+    Route("/stream/{file}", stream.make_handler(lambda: DATA), methods=["GET"]),
 ]
 # Запасной путь устройства через Cloudflare (hbox.fabtech.uz:443): тоннель пропускает только
 # /hbox/admin*, поэтому то же API ещё и под /hbox/admin/dev/v1 (вход — по токену устройства).

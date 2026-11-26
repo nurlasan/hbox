@@ -21,13 +21,15 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
-from . import devices, hours
+from . import devices, hours, stream
 
 log = logging.getLogger("hbox")
 
 DEV_NAME = re.compile(r"^[a-z0-9-]{1,32}$")
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 BASE = "/hbox/admin"
+# адрес живого потока снаружи (Cloudflare, обычный сертификат) — его отдаём внешним системам
+STREAM_URL = os.environ.get("HBOX_STREAM_URL", "https://hbox.fabtech.uz/hbox/v1/stream")
 ONLINE_S = 6 * 60  # устройство спрашивает настройки не реже раза в 5 минут
 
 STATUS_TITLES = {
@@ -536,7 +538,7 @@ async def device(request: Request):
         '<button>Очистить очередь</button> <span class="muted">файлы, записанные до этой минуты, на сервер '
         "не пойдут; на карте удалятся сами через 7 дней</span>"
         + (f'<br><span class="muted">Очищено {local(d["skip_before"])}</span>' if d.get("skip_before") else "")
-        + "</form></div></div>")
+        + "</form>" + stream_box(dev, d) + "</div></div>")
     token = (f'<div class="box">Токен: <a href="{BASE}/token/{esc(dev)}.bat" download>token_{esc(dev)}.bat</a> '
              f'<span class="muted">— запустить рядом с платой (папка pcclient)</span></div>')
     tab_wanted = request.query_params.get("tab", "") or {"ota": "fw"}.get(request.query_params.get("msg", ""), "")
@@ -686,6 +688,42 @@ async def skip_queue(request: Request):
     return RedirectResponse(f"{BASE}/device/{dev}", 303)
 
 
+def stream_box(dev: str, d: dict) -> str:
+    """Живой поток: ссылка с ключом для внешних систем, сменить / выключить."""
+    act = f"{BASE}/device/{esc(dev)}/stream"
+    key = d.get("stream_key")
+    if not key:
+        return (f'<h2>Живой поток</h2><form method="post" action="{act}"><button>Включить и создать ссылку</button> '
+                '<span class="muted">бокс начнёт досылать звук во время записи, задержка 10–30 с</span></form>')
+    url = f"{STREAM_URL}/{dev}.mp3?key={key}"
+    return (f'<h2>Живой поток</h2><p><input readonly value="{esc(url)}" style="width:100%" onclick="this.select()"></p>'
+            f'<audio controls preload="none" src="{esc(url)}"></audio>'
+            f'<form method="post" action="{act}" onsubmit="return confirm(\'Старая ссылка перестанет работать. Дальше?\')" '
+            'style="display:inline"><button>Новая ссылка</button></form> '
+            f'<form method="post" action="{act}/off" onsubmit="return confirm(\'Выключить живой поток?\')" '
+            'style="display:inline"><button>Выключить</button></form>'
+            '<p class="muted">Ключ можно передать и заголовком Authorization: Bearer &lt;ключ&gt;. '
+            "Пока бокс не на связи, ссылка отвечает 503.</p>")
+
+
+@guarded
+async def stream_on(request: Request):
+    dev = request.path_params["dev"]
+    if dev not in devices.load():
+        return Response("Нет такого устройства", 404)
+    devices.update(dev, stream_key=stream.new_key())
+    return RedirectResponse(f"{BASE}/device/{dev}", 303)
+
+
+@guarded
+async def stream_off(request: Request):
+    dev = request.path_params["dev"]
+    if dev not in devices.load():
+        return Response("Нет такого устройства", 404)
+    devices.update(dev, stream_key=None)
+    return RedirectResponse(f"{BASE}/device/{dev}", 303)
+
+
 @guarded
 async def approve(request: Request):
     form = await request.form()
@@ -737,6 +775,8 @@ routes = [
     Route("/device/{dev}", device_save, methods=["POST"]),
     Route("/device/{dev}/firmware", firmware_upload, methods=["POST"]),
     Route("/device/{dev}/skip", skip_queue, methods=["POST"]),
+    Route("/device/{dev}/stream", stream_on, methods=["POST"]),
+    Route("/device/{dev}/stream/off", stream_off, methods=["POST"]),
     Route("/token/{dev}.bat", token_bat),
     Route("/file/{dev}/{day}/{name}", file),
 ]

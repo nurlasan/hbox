@@ -123,10 +123,11 @@ def pieces(data: Path, dev: str, bitrate: int) -> list[dict]:
         except (OSError, ValueError):
             total = 0
         got = p.stat().st_size
+        live = not total  # живой поток: файл ещё пишется, конец неизвестен
         total = max(total, got)
         out.append({"start": t, "end": min(t + total * 8 / bitrate, _hour_end(t)), "bytes": total, "kind": "sending",
                     "name": p.name[:-5], "pct": round(100 * got / total) if total else 0,
-                    "mtime": p.stat().st_mtime})
+                    "mtime": p.stat().st_mtime, "live": live})
     out.sort(key=lambda x: x["start"])
     return out
 
@@ -215,7 +216,9 @@ def hours(d: dict, items: list[dict], now: float) -> list[dict]:
         # в очереди — файла ещё нет, объём по битрейту
         mb += queue * (d.get("bitrate") or 128000) / 8 / 1e6
         # обрывки меньше минуты на стыке файлов — не в счёт
-        if sending >= 60:
+        if sending >= 60 and any(i.get("live") for i in files):
+            state = ("sending", "идёт сейчас")
+        elif sending >= 60:
             state = ("sending", f"передаётся {max(i.get('pct', 0) for i in files if i['kind'] == 'sending')}%")
         elif queue >= 60:
             state = ("queue", "в очереди")

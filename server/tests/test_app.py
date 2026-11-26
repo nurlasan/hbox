@@ -501,3 +501,43 @@ def test_skip_queue(site):
     assert not list((hbox.DATA / "cafe-1").rglob("*.mp3"))
     assert site.get(f"/hbox/v1/files/{new}", headers=AUTH).json()["done"] is False
     assert "Очистить очередь" in site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text
+
+
+def mp3_frames(n):
+    """n кадров MP3 128 кбит/с 44.1 кГц (417 байт, без бита дополнения)"""
+    return b"".join(b"\xff\xfb\x90\x64" + bytes([i % 256]) * 413 for i in range(n))
+
+
+def test_live_stream(site, monkeypatch):
+    from hbox_server import stream
+    monkeypatch.setattr(stream, "IDLE_CLOSE_S", 0)
+    monkeypatch.setattr(stream, "POLL_S", 0.01)
+    url = "/hbox/v1/stream/cafe-1.mp3"
+    assert site.get(url, params={"key": "x"}).status_code == 401
+    # ключ создаётся на сайте; устройство узнаёт, что нужно досылать живой звук
+    site.post("/hbox/admin/device/cafe-1/stream", headers=SITE, auth=ADMIN, follow_redirects=False)
+    key = hbox.devices.load()["cafe-1"]["stream_key"]
+    assert site.get("/hbox/v1/config", headers=AUTH).json()["live"] is True
+    assert key in site.get("/hbox/admin/device/cafe-1", auth=ADMIN).text
+    assert site.get(url, params={"key": key}).status_code == 503  # ещё ничего не прислало
+    # живые куски без total; второй обрывается посреди кадра
+    data = mp3_frames(30)
+    live = "cafe-1_20261110_090000.mp3"
+    for a, b in ((0, 5000), (5000, 9000)):
+        r = site.put(f"/hbox/v1/files/{live}", params={"offset": a}, content=data[a:b], headers=AUTH)
+        assert r.json() == {"size": b, "done": False}
+    got = site.get(url, params={"key": key}).content
+    assert got == data[:9000 // 417 * 417]  # только целые кадры
+    assert site.get(url, headers={"Authorization": f"Bearer {key}"}).status_code == 200
+    # конец часа: устройство дошлёт файл обычным образом
+    r = put(site, data[9000:], 9000, len(data), zlib.crc32(data), name=live)
+    assert r.json() == {"size": len(data), "done": True}
+    site.post("/hbox/admin/device/cafe-1/stream/off", headers=SITE, auth=ADMIN, follow_redirects=False)
+    assert site.get(url, params={"key": key}).status_code == 401
+    assert "live" not in site.get("/hbox/v1/config", headers=AUTH).json()
+
+
+def test_stream_sync():
+    from hbox_server import stream
+    data = b"\x00\xff\x12" + mp3_frames(3)
+    assert stream.sync(data) == 3 and stream.frame_len(data, 3) == 417

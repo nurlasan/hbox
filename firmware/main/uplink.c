@@ -1,6 +1,7 @@
 #include "uplink.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,8 @@ static char route_want[8] = ""; /* сервер может закрепить п
 static bool pin_failed;
 
 static struct settings *cfg;
+/* живой поток: сервер просит досылать текущий файл во время записи (config "live") */
+static bool live_on;
 static struct uplink_stats stats = {.state = "modem", .csq = -1};
 static void url_safe(char *s);
 /* оператор сети (AT+COPS?), для сайта */
@@ -657,6 +660,10 @@ static int fetch_config(void)
 	}
 	s.bitrate = json_long("bitrate", s.bitrate);
 	s.record = json_bool("record", s.record);
+	if (live_on != (json_bool("live", 0) == 1)) {
+		live_on = !live_on;
+		printf("HBOX UP live stream %s\n", live_on ? "on" : "off");
+	}
 	if (memcmp(&s, cfg, sizeof(s)) != 0) {
 		*cfg = s;
 		settings_save(cfg);
@@ -713,8 +720,13 @@ static bool file_name(const struct store_info *info, char *out, size_t cap)
 }
 
 
-/* Тело одного PUT: ~30 с отправки. Кусок, испорченный модемом, сервер выбрасывает целиком (upto). */
+/* Тело одного PUT: ~30 с отправки. Кусок, испорченный модемом, сервер выбрасывает целиком (upto).
+ * При живом потоке — меньше: между кусками очереди досылается живой звук, задержка не растёт. */
 #define PART_BYTES (1024 * 1024)
+#define PART_BYTES_LIVE (128 * 1024)
+/* живой кусок: не меньше (~1 с звука, меньше — накладные на запрос) и не больше за раз */
+#define LIVE_MIN (16 * 1024)
+#define LIVE_MAX (256 * 1024)
 
 static int64_t config_at;
 
@@ -789,6 +801,78 @@ static long verified_size(struct store_file *f, long size, uint32_t *crc_at)
 	return good;
 }
 
+/* Живой поток: текущий файл досылается по мере записи; live_off — сколько из него есть на сервере (-1 — спросить,
+ * LONG_MAX — сервер его не берёт), live_crc — CRC-32 этих байт. Тот же файл в конце часа уходит обычной
+ * отправкой с этого места. */
+static struct store_file *live_f;
+static int64_t live_start;
+static long live_off = -1;
+static uint32_t live_crc;
+
+/* 1 — кусок отправлен, 0 — нечего слать, -1 — ошибка связи */
+static int live_step(void)
+{
+	struct store_info info;
+	char name[96], path[256];
+	int code;
+
+	if (!live_on) {
+		return 0;
+	}
+	struct store_file *f = store_live(&info);
+
+	if (!f || !file_name(&info, name, sizeof(name))) {
+		return 0;
+	}
+	if (f != live_f || info.start_utc != live_start) {
+		live_f = f;
+		live_start = info.start_utc;
+		live_off = -1;
+	}
+	if (live_off < 0) {
+		snprintf(path, sizeof(path), "/hbox/v1/files/%s", name);
+		code = http("GET", path, NULL, 0, 0);
+		if (code != 200) {
+			printf("HBOX UP live status %s failed (%d)\n", name, code);
+			return -1;
+		}
+		long size = json_long("size", 0);
+
+		if (json_bool("done", 0) == 1) {
+			live_off = LONG_MAX;
+			return 0;
+		}
+		if (size < 0 || size > (long)info.size) {
+			size = 0;
+		}
+		live_off = verified_size(f, size, &live_crc);
+	}
+	if (live_off == LONG_MAX || (long)info.size - live_off < LIVE_MIN) {
+		return 0;
+	}
+	uint32_t len = info.size - live_off < LIVE_MAX ? info.size - live_off : LIVE_MAX, upto = live_crc;
+
+	if (!crc_range(f, &upto, live_off, len)) {
+		live_off = -1;
+		return 0;
+	}
+	set_state("live");
+	snprintf(path, sizeof(path), "/hbox/v1/files/%s?offset=%ld&upto=%08lx", name, live_off,
+		 (unsigned long)upto);
+	code = http("PUT", path, f, live_off, len);
+	if (code != 200 || (json_bool("done", 0) != 1 && json_long("size", -1) != live_off + (long)len)) {
+		printf("HBOX UP live %s failed (%d) at %ld %s\n", name, code, live_off, resp);
+		live_off = -1;
+		return code == 200 || code == 422 ? 0 : -1;
+	}
+	live_off = json_bool("done", 0) == 1 ? LONG_MAX : live_off + (long)len;
+	live_crc = upto;
+	taskENTER_CRITICAL(&mux);
+	stats.sent_kb += len / 1024;
+	taskEXIT_CRITICAL(&mux);
+	return 1;
+}
+
 /* Отправляет файл кусками по PART_BYTES до конца или до первой ошибки. true — сервер принял файл целиком. */
 static bool send_file(struct store_file *f, const struct store_info *info)
 {
@@ -812,12 +896,19 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 	if (size < 0 || size > (long)info->size) {
 		size = 0;
 	}
-	start = verified_size(f, size, &crc);
+	if (f == live_f && info->start_utc == live_start && live_off == size) {
+		/* почти весь файл ушёл живым потоком — сверять с картой нечего */
+		start = size;
+		crc = live_crc;
+	} else {
+		start = verified_size(f, size, &crc);
+	}
 	if (start != size) {
 		printf("HBOX UP %s: server has %ld, matches up to %ld\n", name, size, start);
 	}
 	for (size = start;;) {
-		uint32_t len = info->size - size < PART_BYTES ? info->size - size : PART_BYTES;
+		uint32_t part = live_on ? PART_BYTES_LIVE : PART_BYTES;
+		uint32_t len = info->size - size < part ? info->size - size : part;
 		uint32_t upto = crc;
 
 		if (!crc_range(f, &upto, size, len)) {
@@ -842,8 +933,8 @@ static bool send_file(struct store_file *f, const struct store_info *info)
 		}
 		size += len;
 		crc = upto;
-		/* новая прошивка — прервать файл (докачается после), обновиться */
-		if (config_if_due() < 0 || ota.due) {
+		/* новая прошивка — прервать файл (докачается после), обновиться; между кусками — живой звук */
+		if (config_if_due() < 0 || ota.due || live_step() < 0) {
 			return false;
 		}
 	}
@@ -938,6 +1029,20 @@ static void task(void *arg)
 		}
 		if (ota.due) {
 			ota_run(); /* вернулась — не вышло, следующая попытка через OTA_RETRY_US */
+			continue;
+		}
+
+		/* сначала живой звук, очередь — когда он догнан */
+		int live = live_step();
+
+		if (live < 0) {
+			failures++;
+			stats.errors++;
+			vTaskDelay(pdMS_TO_TICKS(5000));
+			continue;
+		}
+		if (live > 0) {
+			failures = 0;
 			continue;
 		}
 

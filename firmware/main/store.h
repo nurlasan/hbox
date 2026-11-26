@@ -41,6 +41,10 @@ void store_close(struct store_file *f);
 
 /* Самый старый готовый к отправке файл или NULL; в info — размер и CRC-32. */
 struct store_file *store_next(struct store_info *info);
+/* Файл, который сейчас пишется (только mp3 и уже со временем), — для живого потока; info->size — сколько
+ * уже точно на карте, столько можно читать. NULL — такого нет. */
+struct store_file *store_live(struct store_info *info);
+/* Читает и файл, который ещё пишется (до записанного на карту места). */
 size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len);
 /* Сервер подтвердил файл целиком — файл помечается отправленным и хранится 7 дней. */
 void store_sent(struct store_file *f);

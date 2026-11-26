@@ -65,6 +65,10 @@ struct store_file {
 	char ext[4];
 	char chan[33];
 	bool crc_known, failed;
+	/* перезаписывали начало (заголовок m4a) — CRC, посчитанная по ходу записи, не годится */
+	bool rewritten;
+	/* сколько байт точно на карте (после fsync) — столько можно читать, пока файл пишется */
+	volatile uint32_t synced;
 	uint32_t seq;
 };
 
@@ -87,7 +91,7 @@ static char drv[8];
 static volatile int64_t failed_us;
 #define FAIL_PAUSE_US 10000000LL
 /* FAT пишет размер файла в каталог только при fsync/закрытии: без этого при выключении пропал бы час */
-#define SYNC_EVERY_US 10000000LL
+#define SYNC_EVERY_US 4000000LL /* и для живого потока: дальше этого места uplink файл не читает */
 /* запись: копится по STAGE_BYTES и одним куском уходит в кольцо */
 static struct {
 	struct op op;
@@ -97,6 +101,9 @@ static size_t stage_len;
 /* чтение для отправки: файл держим открытым между вызовами */
 static FILE *rd;
 static struct store_file *rd_f;
+/* открыт ли .part (файл ещё пишется) и сколько в нём было при открытии: FatFs не видит, что файл вырос */
+static bool rd_part;
+static uint32_t rd_size;
 static uint8_t *crc_buf;
 
 /* <канал>_YYYYMMDD_HHMMSS.<ext> — как на сервере */
@@ -384,9 +391,11 @@ static void writer(void *arg)
 			}
 			if (out && fwrite(op->data, 1, n, out) == n) {
 				f->info.size += n;
+				f->info.crc = esp_rom_crc32_le(f->info.crc, op->data, n);
 				if (esp_timer_get_time() - synced_us >= SYNC_EVERY_US) {
 					fflush(out);
 					fsync(fileno(out));
+					f->synced = f->info.size;
 					synced_us = esp_timer_get_time();
 				}
 			} else if (!f->failed) {
@@ -396,6 +405,7 @@ static void writer(void *arg)
 			}
 			break;
 		case OP_PWRITE:
+			f->rewritten = true;
 			if (!out || fseek(out, op->offset, SEEK_SET) || fwrite(op->data, 1, n, out) != n ||
 			    fseek(out, 0, SEEK_END)) {
 				f->failed = true;
@@ -414,6 +424,7 @@ static void writer(void *arg)
 			path_of(f, false, final, sizeof(final));
 			if (f->info.size && rename(path, final) == 0) {
 				f->state = READY;
+				f->crc_known = !f->rewritten && !f->failed;
 			} else {
 				unlink(path);
 				f->state = FREE;
@@ -658,25 +669,55 @@ struct store_file *store_next(struct store_info *info)
 	return f;
 }
 
+struct store_file *store_live(struct store_info *info)
+{
+	struct store_file *live = NULL;
+
+	xSemaphoreTake(lock, portMAX_DELAY);
+	for (int i = 0; i < FILES_MAX; i++) {
+		struct store_file *f = &files[i];
+
+		if (f->state == RECORDING && !f->failed && f->info.start_utc && strcmp(f->ext, "mp3") == 0) {
+			live = f;
+			*info = f->info;
+			info->size = f->synced;
+		}
+	}
+	xSemaphoreGive(lock);
+	return live;
+}
+
 size_t store_read(struct store_file *f, uint32_t offset, void *buf, size_t len)
 {
 	char path[PATH_LEN];
+	bool part = f->state == RECORDING;
+	uint32_t size = part ? f->synced : f->info.size;
 
-	if (offset >= f->info.size) {
+	if (offset >= size) {
 		return 0;
 	}
-	if (rd_f != f) {
+	/* другой файл, файл дописан и переименован, или пишется и вырос с открытия — открыть заново */
+	if (rd_f != f || rd_part != part || (part && offset + len > rd_size && rd_size < size)) {
 		if (rd) {
 			fclose(rd);
+			rd = NULL;
 		}
-		path_of(f, false, path, sizeof(path));
+		path_of(f, part, path, sizeof(path));
 		rd = fopen(path, "rb");
 		rd_f = rd ? f : NULL;
+		rd_part = part;
+		rd_size = size;
 		if (!rd) {
 			return 0;
 		}
 	}
-	len = len < f->info.size - offset ? len : f->info.size - offset;
+	if (part && size > rd_size) {
+		size = rd_size;
+		if (offset >= size) {
+			return 0;
+		}
+	}
+	len = len < size - offset ? len : size - offset;
 	if (fseek(rd, offset, SEEK_SET)) {
 		return 0;
 	}
