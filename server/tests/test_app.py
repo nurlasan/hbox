@@ -541,3 +541,9 @@ def test_stream_sync():
     from hbox_server import stream
     data = b"\x00\xff\x12" + mp3_frames(3)
     assert stream.sync(data) == 3 and stream.frame_len(data, 3) == 417
+
+
+def test_sim_page(client):
+    r = client.get("/sim")
+    assert r.status_code == 200 and "Hbox — симулятор" in r.text
+    assert client.get("/sim/lame.min.js").text.startswith("function lamejs")

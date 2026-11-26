@@ -33,7 +33,7 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 
 from . import admin, devices, stream
@@ -41,6 +41,7 @@ from . import admin, devices, stream
 log = logging.getLogger("hbox")
 
 DATA = Path(os.environ.get("HBOX_DATA", "/data"))
+STATIC = Path(__file__).parent / "static"
 # меньше этого свободного места — не принимать (диск сервера общий с другими проектами)
 MIN_FREE_GB = float(os.environ.get("HBOX_MIN_FREE_GB", "3"))
 RETENTION_DAYS = float(os.environ.get("HBOX_RETENTION_DAYS", "7"))
@@ -418,6 +419,10 @@ app = Starlette(
         Mount(CF_API_PREFIX, routes=API),
         Route("/hbox/speedtest", speedtest, methods=["POST"]),
         Mount("/hbox/admin", routes=admin.routes),
+        # симулятор бокса в браузере: микрофон ноутбука вместо платы (static/sim.html)
+        Route("/sim", lambda request: FileResponse(STATIC / "sim.html", headers={"Cache-Control": "no-store"})),
+        Route("/sim/lame.min.js", lambda request: FileResponse(STATIC / "lame.min.js",
+                                                                 headers={"Cache-Control": "max-age=86400"})),
         # https://hbox.fabtech.uz/ — сразу на сайт
         Route("/", lambda request: RedirectResponse(admin.BASE + "/")),
     ],

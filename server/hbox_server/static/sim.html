@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hbox — симулятор</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1c1f23;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--ok:#16a34a;--bad:#dc2626;--rec:#ef4444}
+@media (prefers-color-scheme:dark){:root{--bg:#111315;--card:#1b1e22;--text:#e8eaed;--muted:#9aa0a6;--line:#2c3036;--accent:#60a5fa;--ok:#4ade80;--bad:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.page{max-width:640px;margin:0 auto;padding:24px 16px}
+h1{font-size:22px;margin:0 0 4px}
+.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0}
+button{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);cursor:pointer}
+button.stopb{border-color:var(--rec);color:var(--rec);font-weight:600}
+button.main{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.state{font-weight:700;letter-spacing:.04em;padding:4px 10px;border-radius:999px;border:1px solid var(--line)}
+.state.rec{color:var(--rec);border-color:var(--rec)}
+.state.rec::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rec);margin-right:6px;animation:b 1s infinite}
+@keyframes b{50%{opacity:.2}}
+.meter{height:10px;background:var(--line);border-radius:5px;overflow:hidden;flex:1;min-width:120px}
+.meter b{display:block;height:100%;width:0;background:var(--ok);transition:width .1s}
+table{border-collapse:collapse;width:100%}
+td{padding:4px 0;border-bottom:1px solid var(--line)} td:first-child{color:var(--muted);width:45%}
+code{font-size:14px;word-break:break-all}
+#log{font:12px/1.5 ui-monospace,Consolas,monospace;max-height:220px;overflow:auto;white-space:pre-wrap;color:var(--muted)}
+.wait{border-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Hbox — симулятор бокса</h1>
+  <p class="muted">Ноутбук работает как бокс: пишет звук с микрофона и отправляет на сервер. Настройки, расписание и живой поток — на сайте, как у настоящего бокса.</p>
+
+  <div class="card" id="start">
+    <p>1. Нажмите «Начать» и разрешите доступ к микрофону.<br>
+       2. На сайте в блоке «Новые платы» нажмите «Принять».<br>
+       3. Не закрывайте эту вкладку, пока идёт запись.</p>
+    <button class="main" id="go">Начать</button>
+  </div>
+
+  <div class="card wait" id="reg" hidden>
+    <b>Ждём подтверждения на сайте</b>
+    <p>Откройте <a href="/hbox/admin/" target="_blank">сайт Hbox</a> → «Новые платы» → «Принять».<br>
+    IMEI: <code id="imei"></code></p>
+  </div>
+
+  <div class="card" id="main" hidden>
+    <div class="row" style="justify-content:space-between"><div class="row"><b id="name" style="font-size:18px">—</b><span class="state" id="state">—</span></div>
+      <button id="stop">■ Стоп</button></div>
+    <div class="row" style="margin-top:12px"><span class="muted">Уровень</span><div class="meter"><b id="lvl"></b></div></div>
+    <table style="margin-top:12px">
+      <tr><td>Файл</td><td id="file">—</td></tr>
+      <tr><td>Записано</td><td id="rec">—</td></tr>
+      <tr><td>На сервере</td><td id="up">—</td></tr>
+      <tr><td>Связь</td><td id="net">—</td></tr>
+      <tr><td>Микрофон</td><td id="mic">—</td></tr>
+    </table>
+    <p class="muted" style="margin-bottom:0">Звук уходит на сервер каждые несколько секунд. Часовые файлы и живой поток — на странице устройства на сайте.</p>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><b>Журнал</b><button id="reset" title="Новая плата: попроситься на сайт заново">Сбросить</button></div>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script src="/sim/lame.min.js"></script>
+<script>
+"use strict";
+const API = "/hbox/v1", FW = "web-1", LIVE_MIN = 16 * 1024, LIVE_MAX = 256 * 1024, PART = 1 << 20;
+const $ = id => document.getElementById(id);
+
+// --- плата: IMEI и MAC придумываем один раз, токен — от сервера ---
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return null; } }
+function rnd(n, digits) { const a = crypto.getRandomValues(new Uint8Array(n)); return digits ? Array.from(a, x => x % 10).join("") : Array.from(a, x => x.toString(16).padStart(2, "0")).join(""); }
+let imei = store("hbox.imei") || "98" + rnd(13, true);
+let mac = store("hbox.mac") || rnd(6);
+store("hbox.imei", imei); store("hbox.mac", mac);
+let token = store("hbox.token") || "";
+
+function log(s) {
+  const t = new Date().toLocaleTimeString("ru-RU");
+  const el = $("log");
+  el.textContent = `${t}  ${s}\n` + el.textContent.slice(0, 20000);
+}
+
+// --- CRC-32 как zlib: crc32(кусок, crc начала) ---
+const T = new Uint32Array(256);
+for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; T[n] = c >>> 0; }
+function crc32(b, crc = 0) { crc = ~crc; for (let i = 0; i < b.length; i++) crc = T[(crc ^ b[i]) & 255] ^ (crc >>> 8); return ~crc >>> 0; }
+const u8 = a => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+const hex = x => x.toString(16).padStart(8, "0");
+
+// --- файлы в памяти (вместо SD): {name, buf, size, crc, sent, sentCrc, closed} ---
+const files = [];
+let cur = null, enc = null, cfg = { record: true, bitrate: 128000, channel: "" }, skew = 0;
+let sampleRate = 44100, recBytes = 0, sentBytes = 0, nFiles = 0, upErrors = 0, sentFiles = 0;
+const t0 = Date.now();
+const now = () => Date.now() + skew;
+
+function fileName(t) {
+  const d = new Date(t), p = (x, n = 2) => String(x).padStart(n, "0");
+  return `${cfg.channel}_${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}_${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}.mp3`;
+}
+function append(f, b) {
+  if (!b.length) return;
+  if (f.size + b.length > f.buf.length) { const nb = new Uint8Array(Math.max(f.buf.length * 2, f.size + b.length)); nb.set(f.buf.subarray(0, f.size)); f.buf = nb; }
+  f.buf.set(b, f.size); f.size += b.length; f.crc = crc32(b, f.crc); recBytes += b.length;
+}
+function openFile() {
+  enc = new lamejs.Mp3Encoder(1, sampleRate, cfg.bitrate / 1000);
+  cur = { name: fileName(now()), start: now(), buf: new Uint8Array(1 << 20), size: 0, crc: 0, sent: -1, sentCrc: 0, closed: false };
+  files.push(cur); nFiles++;
+  log(`новый файл ${cur.name}`);
+}
+function closeFile() {
+  if (!cur) return;
+  append(cur, u8(enc.flush()));
+  cur.closed = true;
+  log(`файл записан: ${cur.name} (${(cur.size / 1e6).toFixed(1)} МБ)`);
+  if (!cur.size) files.splice(files.indexOf(cur), 1);
+  cur = null; enc = null;
+}
+
+// --- звук: AudioWorklet отдаёт по 4608 отсчётов (4 кадра MP3) ---
+const WORKLET = `class P extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(4608);this.n=0}
+process(i){const c=i[0]&&i[0][0];if(c){for(let k=0;k<c.length;k++){this.b[this.n++]=c[k];if(this.n===4608){this.port.postMessage(this.b.slice(0));this.n=0}}}return true}}
+registerProcessor("hbox",P)`;
+let ticks = 0;
+function onAudio(f32) {
+  if (!started) return;
+  let sum = 0;
+  const i16 = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) { const v = Math.max(-1, Math.min(1, f32[i])); i16[i] = v * 32767; sum += v * v; }
+  $("lvl").style.width = Math.min(100, Math.sqrt(sum / f32.length) * 400) + "%";
+  const recording = token && cfg.channel && cfg.record;
+  if (recording) {
+    // новый час UTC — новый файл, как у платы
+    if (cur && Math.floor(now() / 3600000) !== Math.floor(cur.start / 3600000)) closeFile();
+    if (!cur) openFile();
+    append(cur, u8(enc.encodeBuffer(i16)));
+  } else if (cur) closeFile();
+  // таймеры в фоновой вкладке замедляются, звук — нет: от него и отправка
+  if (++ticks % 10 === 0) { pump(); ui(); }
+}
+
+// --- сервер ---
+async function req(method, path, body) {
+  const h = {};
+  if (token) h.Authorization = "Bearer " + token;
+  const r = await fetch(API + path, { method, body, headers: h, cache: "no-store" });
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (method === "PUT" && body) sentBytes += body.length;
+  return [r.status, j];
+}
+
+let regAt = 0;
+async function register() {
+  if (Date.now() < regAt) return;
+  regAt = Date.now() + 10000;
+  const [code, j] = await req("GET", `/register?imei=${imei}&mac=${mac}&fw=${FW}`);
+  if (code === 200 && j.token) {
+    token = j.token; store("hbox.token", token); configAt = 0;
+    log("принят на сайте, токен получен");
+  } else if (code === 202) {
+    $("reg").hidden = false; $("main").hidden = true;
+  } else log(`регистрация не удалась (${code})`);
+}
+
+let configAt = 0, liveOn = false;
+async function config() {
+  const pend = files.filter(f => f.closed);
+  const q = { rec: started && cfg.record && cfg.channel ? 1 : 0, files: nFiles, pending: pend.length, dropped: 0, overflows: 0,
+    rec_errors: 0, cpu: 0, csq: 31, up_errors: upErrors, sent: sentFiles, kbps: 0,
+    uptime: Math.floor((Date.now() - t0) / 60000), reset: 1,
+    pending_mb: Math.round(files.reduce((a, f) => a + f.size - Math.max(f.sent, 0), 0) / 1048576),
+    fw: FW, op: "WEB", imei };
+  const t1 = Date.now();
+  const [code, j] = await req("GET", "/config?" + new URLSearchParams(q));
+  if (code === 401) { log("сервер не знает токен — прошусь заново"); token = ""; store("hbox.token", null); return; }
+  if (code !== 200) { configAt = Date.now() + 10000; return; }
+  if (j.time) skew = Date.parse(j.time) - (t1 + Date.now()) / 2;
+  const nc = { record: !!j.record, bitrate: j.bitrate || 128000, channel: j.channel || "" };
+  if (JSON.stringify(nc) !== JSON.stringify(cfg)) {
+    log(`настройки: ${nc.channel}, запись ${nc.record ? "вкл" : "выкл"}, ${nc.bitrate / 1000} кбит/с`);
+    // битрейт или имя сменились — с нового файла
+    if (cur && (nc.bitrate !== cfg.bitrate || nc.channel !== cfg.channel)) closeFile();
+  }
+  cfg = nc;
+  if (!!j.live !== liveOn) { liveOn = !!j.live; log(`живой поток ${liveOn ? "включён" : "выключен"} на сайте`); }
+  $("reg").hidden = true; $("main").hidden = false;
+  configAt = Date.now() + Math.max(5, Math.min(300, j.recheck || 300)) * 1000;
+}
+
+// сколько из принятого сервером совпадает с файлом
+function verified(f, size, check) {
+  if (!size) return [0, 0];
+  if (!check) return [size, crc32(f.buf.subarray(0, size))];
+  let good = 0, goodCrc = 0, crc = 0, pos = 0;
+  for (const it of check.split(",")) {
+    const [o, w] = it.split(":"), off = +o;
+    if (off > f.size) break;
+    crc = crc32(f.buf.subarray(pos, off), crc); pos = off;
+    if (crc === parseInt(w, 16)) { good = off; goodCrc = crc; }
+  }
+  return [good, goodCrc];
+}
+
+async function sync(f) {
+  const [code, j] = await req("GET", `/files/${f.name}`);
+  if (code !== 200) throw new Error(`статус ${code}`);
+  if (j.done) { f.sent = f.size; f.done = true; return; }
+  [f.sent, f.sentCrc] = verified(f, Math.min(j.size || 0, f.size), j.check || "");
+}
+
+async function put(f, max, whole) {
+  const body = f.buf.slice(f.sent, Math.min(f.size, f.sent + max));
+  const upto = crc32(body, f.sentCrc);
+  const extra = whole ? `&total=${f.size}&crc=${hex(f.crc)}` : "";
+  const [code, j] = await req("PUT", `/files/${f.name}?offset=${f.sent}&upto=${hex(upto)}${extra}`, body);
+  if (code !== 200) { f.sent = -1; throw new Error(`отправка ${f.name}: ${code} ${j.error || ""}`); }
+  if (j.done) { f.done = true; return; }
+  if (j.size !== f.sent + body.length) { f.sent = -1; throw new Error(`сервер принял ${j.size}`); }
+  f.sent += body.length; f.sentCrc = upto;
+}
+
+let busy = false, lastOk = 0, netErr = "";
+async function pump() {
+  if (busy) return;
+  busy = true;
+  try {
+    if (!token) { await register(); return; }
+    if (Date.now() >= configAt) await config();
+    // дописанные файлы — до конца (живой поток уже отправил почти всё)
+    for (const f of files.filter(f => f.closed)) {
+      if (f.sent < 0) await sync(f);
+      while (!f.done) await put(f, PART, true);
+      files.splice(files.indexOf(f), 1); sentFiles++;
+      log(`файл отправлен: ${f.name}`);
+    }
+    // текущий — живыми кусками, сколько накопилось
+    const f = cur;
+    if (f) {
+      if (f.sent < 0) await sync(f);
+      if (!f.done && f.size - f.sent >= LIVE_MIN) await put(f, LIVE_MAX, false);
+    }
+    lastOk = Date.now(); netErr = "";
+  } catch (e) {
+    upErrors++; netErr = e.message || "нет связи";
+    log("ошибка: " + netErr);
+  } finally { busy = false; }
+}
+
+function ui() {
+  const recording = started && token && cfg.channel && cfg.record;
+  $("name").textContent = cfg.channel || "—";
+  const s = $("state");
+  s.textContent = recording ? "REC" : !started ? "СТОП" : token && cfg.channel ? "ПАУЗА" : "—";
+  $("stop").hidden = !started;
+  s.className = "state" + (recording ? " rec" : "");
+  $("file").textContent = cur ? cur.name : "—";
+  $("rec").textContent = `${(recBytes / 1e6).toFixed(1)} МБ · ${cfg.bitrate / 1000} кбит/с · ${sampleRate} Гц`;
+  const behind = files.reduce((a, f) => a + f.size - Math.max(f.sent, 0), 0);
+  $("up").textContent = `отправлено ${(sentBytes / 1e6).toFixed(1)} МБ · ждёт ${(behind / 1024).toFixed(0)} КБ`;
+  $("net").textContent = netErr ? "ошибка: " + netErr : lastOk ? "на связи" : "подключение…";
+  $("imei").textContent = imei;
+}
+
+let started = false, audio = null, timer = null, lock = null;
+$("stop").className = "stopb";
+$("go").onclick = async () => {
+  if (started) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+    let ctx;
+    try { ctx = new AudioContext({ sampleRate: 44100 }); } catch (e) { ctx = new AudioContext(); }
+    sampleRate = ctx.sampleRate;
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
+    const node = new AudioWorkletNode(ctx, "hbox");
+    node.port.onmessage = e => onAudio(e.data);
+    ctx.createMediaStreamSource(stream).connect(node);
+    $("mic").textContent = stream.getAudioTracks()[0].label || "микрофон";
+    audio = { stream, ctx };
+    started = true;
+    $("start").hidden = true; $("main").hidden = false;
+    log(`запись начата, микрофон: ${$("mic").textContent}, ${sampleRate} Гц`);
+    try { lock = await navigator.wakeLock.request("screen"); } catch (e) {}
+    if (!timer) timer = setInterval(() => { pump(); ui(); }, 1000);
+    pump(); ui();
+  } catch (e) { log("нет доступа к микрофону: " + e.message); alert("Нужен доступ к микрофону"); }
+};
+// стоп: файл закрывается и досылается, микрофон отпускается; «Начать» — снова с нового файла
+$("stop").onclick = () => {
+  if (!started) return;
+  started = false;
+  closeFile();
+  if (audio) { audio.stream.getTracks().forEach(t => t.stop()); audio.ctx.close(); audio = null; }
+  if (lock) { lock.release().catch(() => {}); lock = null; }
+  $("lvl").style.width = "0";
+  $("go").textContent = "Начать снова";
+  $("start").hidden = false;
+  log("запись остановлена — остаток уходит на сервер");
+  configAt = 0; // сайт сразу увидит, что запись не идёт
+  pump(); ui();
+};
+$("reset").onclick = () => {
+  if (!confirm("Забыть эту плату и попроситься на сайт заново?")) return;
+  ["hbox.token", "hbox.imei", "hbox.mac"].forEach(k => store(k, null));
+  location.reload();
+};
+window.addEventListener("beforeunload", e => { if (cur || files.length) { e.preventDefault(); e.returnValue = ""; } });
+$("imei").textContent = imei;
+log(token ? "плата уже принята на сайте" : `новая плата, IMEI ${imei}`);
+</script>
+</body>
+</html>

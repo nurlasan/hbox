@@ -24,3 +24,5 @@ deploy/tls/
 deploy/tunnel.env
 .env
 data/
+pcclient/sim_data/
+pcclient/sim_state.json
